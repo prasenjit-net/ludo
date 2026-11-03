@@ -727,10 +727,9 @@ fn sync_fields(
                 .unwrap_or_default(),
             Field::RoomHint => match (&session.room, session.is_host()) {
                 (Some(_), false) => "Waiting for the host to start".into(),
-                (Some(_), true) if session.players.len() < 2 => {
-                    "Waiting for another player to join".into()
+                (Some(r), true) if session.players.len() < r.capacity => {
+                    "Start now (AI fills empty seats), or wait for players".into()
                 }
-                (Some(_), true) => "Start now, or wait for more players".into(),
                 _ => String::new(),
             },
             Field::Status => session.status(),
@@ -791,7 +790,7 @@ fn sync_slots(
                 player_color(p.player),
                 if left { MUTED } else { TEXT },
             ),
-            None => ("Open seat".to_string(), BUTTON, MUTED),
+            None => ("Open seat (AI)".to_string(), BUTTON, MUTED),
         };
         if let Some(p) = player {
             if slot.lobby && session.room.as_ref().is_some_and(|r| r.host == slot.idx) {
@@ -799,6 +798,9 @@ fn sync_slots(
             }
             if session.in_room && session.you == Some(slot.idx) {
                 name.push_str(" (you)");
+            }
+            if p.bot {
+                name.push_str(" (bot)");
             }
             if left {
                 name.push_str(" (left)");
@@ -925,7 +927,7 @@ fn sync_controls(
                 set_disabled(
                     &mut commands,
                     [(*child, disabled)],
-                    session.players.len() < 2,
+                    session.players.is_empty(),
                 );
             }
         }

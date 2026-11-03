@@ -25,7 +25,7 @@ pub enum ClientMsg {
     SetColor {
         color: Player,
     },
-    /// Host only: start with the players who have joined (at least 2).
+    /// Host only: start now; seats nobody has taken are filled with AI players.
     StartGame,
     LeaveRoom,
     Roll,
@@ -39,6 +39,9 @@ pub struct LobbyPlayer {
     pub name: String,
     pub player: Player,
     pub connected: bool,
+    /// Played by the server, not by a person.
+    #[serde(default)]
+    pub bot: bool,
 }
 
 /// One row of the room browser.

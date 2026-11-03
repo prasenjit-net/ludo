@@ -250,6 +250,7 @@ impl Session {
                         name: p.name().into(),
                         player: p,
                         connected: true,
+                        bot: false,
                     })
                     .collect();
                 self.start_game(Game::new(seats));

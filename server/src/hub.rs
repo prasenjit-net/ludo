@@ -19,6 +19,9 @@ pub type Tx = UnboundedSender<ServerMsg>;
 /// A player who lets this many turns time out in a row is removed from the game.
 const MAX_TIMEOUTS: u8 = 3;
 
+/// How long an AI player "thinks" before each roll and each move.
+const BOT_DELAY: Duration = Duration::from_millis(800);
+
 struct Conn {
     tx: Tx,
     client_id: String,
@@ -34,6 +37,8 @@ struct Member {
     name: String,
     color: Player,
     timeouts: u8,
+    /// An AI player: never has a connection, never times out.
+    bot: bool,
 }
 
 struct Room {
@@ -61,7 +66,8 @@ impl Room {
             .map(|m| LobbyPlayer {
                 name: m.name.clone(),
                 player: m.color,
-                connected: m.conn.is_some(),
+                connected: m.bot || m.conn.is_some(),
+                bot: m.bot,
             })
             .collect()
     }
@@ -70,8 +76,40 @@ impl Room {
         self.game.as_ref().is_some_and(|g| g.phase() == Phase::Over)
     }
 
+    /// Is a person still attached? Bots alone do not keep a room alive.
     fn anyone_connected(&self) -> bool {
         self.members.iter().any(|m| m.conn.is_some())
+    }
+
+    /// Fill every empty seat with an AI player, in the first free colours.
+    fn add_bots(&mut self) {
+        let mut n = 0;
+        while self.members.len() < self.capacity {
+            let Some(color) = Player::ALL.into_iter().find(|&c| self.color_free(c)) else {
+                break;
+            };
+            n += 1;
+            self.members.push(Member {
+                client_id: format!("bot-{n}"),
+                conn: None,
+                name: format!("Bot {n}"),
+                color,
+                timeouts: 0,
+                bot: true,
+            });
+        }
+    }
+
+    /// When the current turn must be played automatically: soon for an AI
+    /// player, after the turn time for a person, never once the game is over.
+    fn next_deadline(&self, turn_time: Duration) -> Option<Instant> {
+        let game = self.game.as_ref().filter(|g| g.phase() != Phase::Over)?;
+        let wait = if self.members[game.turn].bot {
+            BOT_DELAY
+        } else {
+            turn_time
+        };
+        Some(Instant::now() + wait)
     }
 
     fn color_free(&self, color: Player) -> bool {
@@ -161,8 +199,10 @@ impl Inner {
             return;
         };
         let players = room.players();
+        let bot_turn = room.game.as_ref().is_some_and(|g| room.members[g.turn].bot);
         let turn_ms = room
             .deadline
+            .filter(|_| !bot_turn)
             .map(|d| d.saturating_duration_since(Instant::now()).as_millis() as u32);
         for (you, member) in room.members.iter().enumerate() {
             let Some(conn) = member.conn else { continue };
@@ -192,10 +232,11 @@ impl Inner {
         let Some(room) = self.rooms.get_mut(&id) else {
             return;
         };
+        room.add_bots();
         // Seats follow board order so turns go clockwise.
         room.members.sort_by_key(|m| m.color.index());
         room.game = Some(Game::new(room.members.iter().map(|m| m.color).collect()));
-        room.deadline = Some(Instant::now() + turn_time);
+        room.deadline = room.next_deadline(turn_time);
         self.push_room(id, Vec::new());
         self.push_rooms();
     }
@@ -326,6 +367,7 @@ impl Hub {
             name: c.name.clone(),
             color: c.color,
             timeouts: 0,
+            bot: false,
         };
         let room = Room {
             name: clean(name, 24, &format!("{}'s room", c.name)),
@@ -366,6 +408,7 @@ impl Hub {
             name,
             color,
             timeouts: 0,
+            bot: false,
         });
         let full = room.members.len() == room.capacity;
         inner.conns.get_mut(&conn).unwrap().room = Some(id);
@@ -407,9 +450,6 @@ impl Hub {
         }
         if room.members[room.host_index()].conn != Some(conn) {
             return inner.error(conn, "only the host can start the game");
-        }
-        if room.members.len() < 2 {
-            return inner.error(conn, "waiting for at least one more player");
         }
         inner.start_game(id, self.turn_time);
     }
@@ -453,7 +493,7 @@ impl Hub {
         match action(game) {
             Ok(events) => {
                 room.members[seat].timeouts = 0;
-                room.deadline = (!room.finished()).then(|| Instant::now() + self.turn_time);
+                room.deadline = room.next_deadline(self.turn_time);
                 inner.push_room(id, events);
             }
             Err(e) => inner.error(conn, &e.to_string()),
@@ -481,20 +521,29 @@ impl Hub {
             };
             let seat = game.turn;
             let mut events = Vec::new();
-            if game.dice.is_none() {
-                events.extend(game.roll(rng.random_range(1..=6)).unwrap_or_default());
-            }
-            if let Some(token) = game.auto_move() {
-                events.extend(game.play(token).unwrap_or_default());
-            }
-            let member = &mut room.members[seat];
-            member.timeouts += 1;
             let mut kicked = None;
-            if member.timeouts >= MAX_TIMEOUTS && !room.finished() {
-                events.extend(room.game.as_mut().unwrap().leave(seat));
-                kicked = room.members[seat].conn.take();
+            if room.members[seat].bot {
+                // One step per tick (roll, then move) so people can follow along.
+                if game.dice.is_none() {
+                    events.extend(game.roll(rng.random_range(1..=6)).unwrap_or_default());
+                } else if let Some(token) = game.best_move() {
+                    events.extend(game.play(token).unwrap_or_default());
+                }
+            } else {
+                if game.dice.is_none() {
+                    events.extend(game.roll(rng.random_range(1..=6)).unwrap_or_default());
+                }
+                if let Some(token) = game.auto_move() {
+                    events.extend(game.play(token).unwrap_or_default());
+                }
+                let member = &mut room.members[seat];
+                member.timeouts += 1;
+                if member.timeouts >= MAX_TIMEOUTS && !room.finished() {
+                    events.extend(room.game.as_mut().unwrap().leave(seat));
+                    kicked = room.members[seat].conn.take();
+                }
             }
-            room.deadline = (!room.finished()).then(|| now + self.turn_time);
+            room.deadline = room.next_deadline(self.turn_time);
             let alive = room.anyone_connected();
             if let Some(conn) = kicked {
                 if let Some(c) = inner.conns.get_mut(&conn) {
