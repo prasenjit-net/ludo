@@ -2,12 +2,12 @@
 
 use crate::{
     board::{CELL, cell_pos, player_color},
-    net,
+    net, paint,
     session::Session,
 };
-use bevy::{prelude::*, window::PrimaryWindow};
+use bevy::{asset::RenderAssetUsages, prelude::*, sprite::Anchor, window::PrimaryWindow};
 use ludo_core::{
-    Event, Game, HOME, TOKENS,
+    Event, Game, HOME, TOKENS, YARD,
     board::{FLY_MS, HOP_MS, POP_MS, ROLL_MS, path, token_pos},
 };
 use std::collections::{HashMap, VecDeque};
@@ -20,7 +20,14 @@ impl Plugin for PlayPlugin {
             .add_systems(Startup, setup_assets)
             .add_systems(
                 Update,
-                (pump, sync_tokens, handle_clicks, animate_tokens).chain(),
+                (
+                    pump,
+                    sync_tokens,
+                    handle_clicks,
+                    animate_tokens,
+                    update_ghosts,
+                )
+                    .chain(),
             );
     }
 }
@@ -98,30 +105,58 @@ const BACKLOG: usize = 8;
 #[derive(Component)]
 struct Ring;
 
+/// The pawn picture of a token. A token's entity sits on the centre of its cell;
+/// the pawn stands on the ground a little below that.
+#[derive(Component)]
+struct PawnSprite;
+
+/// A translucent pawn on the cell a movable token would land on.
+#[derive(Component)]
+struct Ghost {
+    seat: usize,
+    idx: usize,
+}
+
+/// Where the foot of a pawn rests, relative to the middle of its cell.
+const GROUND_Y: f32 = -CELL * 0.3;
+/// How large a pawn is drawn.
+const PAWN_SIZE: Vec2 = Vec2::new(CELL * 0.72, CELL * 0.96);
+
 #[derive(Resource)]
 struct TokenAssets {
     ring: Handle<Mesh>,
-    outer: Handle<Mesh>,
-    inner: Handle<Mesh>,
-    dark: Handle<ColorMaterial>,
+    shadow_mesh: Handle<Mesh>,
     shadow: Handle<ColorMaterial>,
     glow: Handle<ColorMaterial>,
-    players: [Handle<ColorMaterial>; 4],
+    pawns: [Handle<Image>; 4],
 }
 
 fn setup_assets(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<ColorMaterial>>,
+    mut images: ResMut<Assets<Image>>,
 ) {
+    let pawns = ludo_core::Player::ALL.map(|p| {
+        let c = player_color(p).to_srgba();
+        images.add(Image::new(
+            bevy::render::render_resource::Extent3d {
+                width: paint::PAWN_W as u32,
+                height: paint::PAWN_H as u32,
+                depth_or_array_layers: 1,
+            },
+            bevy::render::render_resource::TextureDimension::D2,
+            paint::pawn([c.red, c.green, c.blue]),
+            bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::RENDER_WORLD,
+        ))
+    });
     commands.insert_resource(TokenAssets {
         ring: meshes.add(Circle::new(CELL * 0.46)),
-        outer: meshes.add(Circle::new(CELL * 0.36)),
-        inner: meshes.add(Circle::new(CELL * 0.27)),
-        dark: mats.add(Color::srgb(0.08, 0.08, 0.1)),
-        shadow: mats.add(Color::srgba(0.0, 0.0, 0.0, 0.3)),
+        shadow_mesh: meshes.add(Circle::new(CELL * 0.36)),
+        shadow: mats.add(Color::srgba(0.0, 0.0, 0.0, 0.35)),
         glow: mats.add(Color::srgb(1.0, 1.0, 1.0)),
-        players: ludo_core::Player::ALL.map(|p| mats.add(player_color(p))),
+        pawns,
     });
 }
 
@@ -181,7 +216,7 @@ fn sync_tokens(
     mut session: ResMut<Session>,
     assets: Res<TokenAssets>,
     mut seen: Local<(u32, u32)>,
-    existing: Query<Entity, With<Token>>,
+    existing: Query<Entity, Or<(With<Token>, With<Ghost>)>>,
     mut targets: Query<(&Token, &mut Target, &mut Motion, &mut Visibility)>,
 ) {
     if *seen == (session.generation, session.rev) {
@@ -214,28 +249,41 @@ fn sync_tokens(
                     .with_children(|t| {
                         t.spawn((
                             Shadow,
-                            Mesh2d(assets.outer.clone()),
+                            Mesh2d(assets.shadow_mesh.clone()),
                             MeshMaterial2d(assets.shadow.clone()),
-                            Transform::from_xyz(0.0, -SHADOW_DROP, -0.2)
-                                .with_scale(Vec3::new(1.0, 0.55, 1.0)),
+                            Transform::from_xyz(0.0, GROUND_Y, -0.2).with_scale(SHADOW_SCALE),
                         ));
                         t.spawn((
                             Ring,
                             Mesh2d(assets.ring.clone()),
                             MeshMaterial2d(assets.glow.clone()),
-                            Transform::from_xyz(0.0, 0.0, -0.1),
+                            Transform::from_xyz(0.0, GROUND_Y, -0.1)
+                                .with_scale(Vec3::new(1.0, 0.5, 1.0)),
                             Visibility::Hidden,
                         ));
                         t.spawn((
-                            Mesh2d(assets.outer.clone()),
-                            MeshMaterial2d(assets.dark.clone()),
-                        ));
-                        t.spawn((
-                            Mesh2d(assets.inner.clone()),
-                            MeshMaterial2d(assets.players[player.index()].clone()),
-                            Transform::from_xyz(0.0, 0.0, 0.1),
+                            PawnSprite,
+                            Sprite {
+                                image: assets.pawns[player.index()].clone(),
+                                custom_size: Some(PAWN_SIZE),
+                                ..default()
+                            },
+                            Anchor::BOTTOM_CENTER,
+                            Transform::from_xyz(0.0, GROUND_Y, 0.1),
                         ));
                     });
+                commands.spawn((
+                    Ghost { seat, idx },
+                    Sprite {
+                        image: assets.pawns[player.index()].clone(),
+                        custom_size: Some(PAWN_SIZE),
+                        color: Color::srgba(1.0, 1.0, 1.0, 0.4),
+                        ..default()
+                    },
+                    Anchor::BOTTOM_CENTER,
+                    Transform::from_xyz(0.0, 0.0, 4.5),
+                    Visibility::Hidden,
+                ));
             }
         }
     } else {
@@ -329,8 +377,8 @@ fn queue_events(
     }
 }
 
-/// Distance the shadow sits below a resting token.
-const SHADOW_DROP: f32 = CELL * 0.08;
+/// A flattened circle under the foot of the pawn.
+const SHADOW_SCALE: Vec3 = Vec3::new(1.25, 0.5, 1.0);
 
 fn smooth(u: f32) -> f32 {
     u * u * (3.0 - 2.0 * u)
@@ -342,9 +390,31 @@ fn animate_tokens(
     mut tokens: Query<(&Token, &Target, &mut Motion, &mut Transform, &Children)>,
     mut rings: Query<
         (&mut Visibility, &mut Transform),
-        (With<Ring>, Without<Token>, Without<Shadow>),
+        (
+            With<Ring>,
+            Without<Token>,
+            Without<Shadow>,
+            Without<PawnSprite>,
+        ),
     >,
-    mut shadows: Query<&mut Transform, (With<Shadow>, Without<Token>, Without<Ring>)>,
+    mut shadows: Query<
+        &mut Transform,
+        (
+            With<Shadow>,
+            Without<Token>,
+            Without<Ring>,
+            Without<PawnSprite>,
+        ),
+    >,
+    mut pawns: Query<
+        &mut Transform,
+        (
+            With<PawnSprite>,
+            Without<Token>,
+            Without<Ring>,
+            Without<Shadow>,
+        ),
+    >,
 ) {
     let backlog: usize = tokens.iter().map(|(_, _, m, ..)| m.queue.len()).sum();
     let speed = 1.0 + backlog.saturating_sub(BACKLOG) as f32 / BACKLOG as f32;
@@ -412,7 +482,9 @@ fn animate_tokens(
         }
         busy |= !motion.queue.is_empty();
 
-        tf.translation = Vec3::new(pos.x, pos.y + lift, if flying { 6.0 } else { 5.0 });
+        // Tokens lower on the screen are in front; a jumping one is in front of all.
+        let z = if flying { 6.0 } else { 5.0 - pos.y * 0.0005 };
+        tf.translation = Vec3::new(pos.x, pos.y + lift, z);
         tf.scale = scale;
 
         let active = clickable
@@ -425,19 +497,57 @@ fn animate_tokens(
                 } else {
                     Visibility::Hidden
                 };
-                ring_tf.scale = Vec3::splat(pulse);
+                ring_tf.scale = Vec3::new(pulse, 0.5 * pulse, 1.0);
+            }
+            if let Ok(mut pawn_tf) = pawns.get_mut(*child) {
+                // A movable pawn bobs to catch the eye.
+                let bob = if active {
+                    (time.elapsed_secs() * 8.0).sin().abs() * CELL * 0.06
+                } else {
+                    0.0
+                };
+                pawn_tf.translation.y = GROUND_Y + bob;
             }
             if let Ok(mut shadow_tf) = shadows.get_mut(*child) {
                 // Stay on the ground (undo the lift) and shrink as the token rises.
                 let shrink = (1.0 - lift / (CELL * 3.0)).max(0.5);
-                shadow_tf.translation.y = -SHADOW_DROP - lift;
-                shadow_tf.scale = Vec3::new(shrink, 0.55 * shrink, 1.0);
+                shadow_tf.translation.y = GROUND_Y - lift;
+                shadow_tf.scale = SHADOW_SCALE * Vec3::new(shrink, shrink, 1.0);
             }
         }
     }
 
     if session.animating != busy {
         session.animating = busy;
+    }
+}
+
+/// Show where each movable token would land with the rolled value.
+fn update_ghosts(
+    time: Res<Time>,
+    session: Res<Session>,
+    mut ghosts: Query<(&Ghost, &mut Transform, &mut Visibility, &mut Sprite)>,
+) {
+    let clickable = session.clickable();
+    let game = session.game.as_ref();
+    let alpha = 0.35 + 0.15 * (time.elapsed_secs() * 6.0).sin();
+    for (ghost, mut tf, mut vis, mut sprite) in &mut ghosts {
+        let landing = clickable
+            .as_ref()
+            .filter(|(seat, idxs)| *seat == ghost.seat && idxs.contains(&ghost.idx))
+            .zip(game)
+            .and_then(|(_, g)| Some((g, g.dice?)));
+        let Some((game, dice)) = landing else {
+            *vis = Visibility::Hidden;
+            continue;
+        };
+        let from = game.tokens[ghost.seat][ghost.idx];
+        let to = if from == YARD { 0 } else { from + dice as i8 };
+        let (c, r) = token_pos(game.seats[ghost.seat], ghost.idx, to);
+        let at = cell_pos(c, r);
+        tf.translation = Vec3::new(at.x, at.y + GROUND_Y, 4.5 - at.y * 0.0005);
+        sprite.color = Color::srgba(1.0, 1.0, 1.0, alpha);
+        *vis = Visibility::Inherited;
     }
 }
 
@@ -468,7 +578,8 @@ fn handle_clicks(
     let hit = tokens
         .iter()
         .filter(|(t, _)| t.seat == seat && movable.contains(&t.idx))
-        .map(|(t, target)| (t.idx, target.0.distance(world)))
+        // Aim at the middle of the standing pawn, not of its cell.
+        .map(|(t, target)| (t.idx, (target.0 + Vec2::Y * CELL * 0.13).distance(world)))
         .filter(|(_, d)| *d < CELL * 0.5)
         .min_by(|a, b| a.1.total_cmp(&b.1));
     if let Some((idx, _)) = hit {

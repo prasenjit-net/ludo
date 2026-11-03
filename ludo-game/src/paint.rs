@@ -564,6 +564,95 @@ fn finish(canvas: Canvas) -> Vec<u8> {
     out
 }
 
+/// Size in pixels of a pawn image (width x height); it is drawn 0.72 x 0.96 cells.
+pub const PAWN_W: usize = 96;
+pub const PAWN_H: usize = 128;
+
+/// Radius of the pawn's body at height `h` (units of the image width), for
+/// the base, the bell and the collar; the head is a sphere on top.
+fn pawn_radius(h: f32) -> f32 {
+    if h < 0.0 {
+        0.0
+    } else if h < 0.14 {
+        // Rounded foot.
+        let t = (h - 0.07) / 0.07;
+        0.44 + 0.05 * (1.0 - t * t).max(0.0).sqrt()
+    } else if h < 0.62 {
+        let t = 1.0 - (h - 0.14) / 0.48;
+        0.15 + 0.29 * t * t
+    } else if h < 0.74 {
+        0.15 + 0.1 * ((h - 0.62) / 0.12 * std::f32::consts::PI).sin()
+    } else {
+        0.0
+    }
+}
+
+const HEAD_H: f32 = 0.93;
+const HEAD_R: f32 = 0.23;
+
+/// A lacquered pawn in `color`, lit from the top left, as straight RGBA.
+pub fn pawn(color: Rgb) -> Vec<u8> {
+    let light = [-0.45f32, 0.65, 0.62];
+    let len = (light[0] * light[0] + light[1] * light[1] + light[2] * light[2]).sqrt();
+    let l = [light[0] / len, light[1] / len, light[2] / len];
+    let half = [l[0], l[1], l[2] + 1.0];
+    let hl = (half[0] * half[0] + half[1] * half[1] + half[2] * half[2]).sqrt();
+    let half = [half[0] / hl, half[1] / hl, half[2] / hl];
+    let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let norm = |v: [f32; 3]| {
+        let n = dot(v, v).sqrt().max(1e-6);
+        [v[0] / n, v[1] / n, v[2] / n]
+    };
+
+    let mut out = vec![0u8; PAWN_W * PAWN_H * 4];
+    let px = PAWN_W as f32;
+    for y in 0..PAWN_H {
+        for x in 0..PAWN_W {
+            let u = (x as f32 + 0.5) / px - 0.5;
+            // Height above the base, in image widths; the base sits a few pixels up.
+            let h = (PAWN_H as f32 - y as f32 - 0.5 - 3.0) / px;
+
+            // Distance from the pawn's outline (negative inside), and its normal.
+            let head_d = ((u * u) + (h - HEAD_H) * (h - HEAD_H)).sqrt() - HEAD_R;
+            let r = pawn_radius(h);
+            let body_d = u.abs() - r;
+            let (dist, normal) = if head_d < 0.0 {
+                let dh = h - HEAD_H;
+                let nz = (HEAD_R * HEAD_R - u * u - dh * dh).max(0.0).sqrt();
+                (head_d, norm([u, dh, nz]))
+            } else if r > 0.0 && body_d < 0.0 {
+                let nx = (u / r).clamp(-1.0, 1.0);
+                let nz = (1.0 - nx * nx).max(0.0).sqrt();
+                let slope = -(pawn_radius(h + 0.01) - pawn_radius(h - 0.01)) / 0.02;
+                (body_d, norm([nx, slope, nz]))
+            } else {
+                (
+                    head_d.min(if r > 0.0 { body_d } else { f32::MAX }),
+                    [0.0, 0.0, 1.0],
+                )
+            };
+            let cover = (0.5 - dist * px).clamp(0.0, 1.0);
+            if cover <= 0.0 {
+                continue;
+            }
+            let diffuse = dot(normal, l).max(0.0);
+            let spec = dot(normal, half).max(0.0).powi(26);
+            let rim = smoothstep(0.55, 1.0, (1.0 - normal[2]).max(0.0));
+            let k = (0.32 + 0.8 * diffuse) * (1.0 - 0.4 * rim);
+            // A little darker towards the foot, as if the table shadows it.
+            let k = k * (0.88 + 0.12 * smoothstep(0.0, 0.4, h));
+            let shade = scale(color, k);
+            let rgb = mix(shade, [1.0, 1.0, 0.95], 0.6 * spec);
+            let i = (y * PAWN_W + x) * 4;
+            for c in 0..3 {
+                out[i + c] = (rgb[c].clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+            }
+            out[i + 3] = (cover * 255.0 + 0.5) as u8;
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -585,6 +674,16 @@ mod tests {
         assert_eq!(alpha(0, 0), 0, "outer corner is cut away");
         assert_eq!(alpha(SIDE / 2, SIDE / 2), 255);
         assert_eq!(alpha(SIDE / 2, 6), 255, "frame is solid");
+    }
+
+    #[test]
+    fn pawn_has_a_body_and_clear_corners() {
+        let img = pawn(colors()[0]);
+        assert_eq!(img.len(), PAWN_W * PAWN_H * 4);
+        let alpha = |x: usize, y: usize| img[(y * PAWN_W + x) * 4 + 3];
+        assert_eq!(alpha(0, 0), 0);
+        assert_eq!(alpha(PAWN_W / 2, PAWN_H / 2), 255);
+        assert_eq!(alpha(PAWN_W / 2, PAWN_H - 8), 255, "the foot");
     }
 
     /// Set `LUDO_DUMP_BOARD=/path/board.rgba` to write the raw pixels out and look at them.
