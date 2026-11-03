@@ -6,8 +6,11 @@ use crate::{
     session::Session,
 };
 use bevy::{prelude::*, window::PrimaryWindow};
-use ludo_core::{Game, TOKENS, board::token_pos};
-use std::collections::HashMap;
+use ludo_core::{
+    Event, Game, HOME, TOKENS,
+    board::{FLY_MS, HOP_MS, POP_MS, path, token_pos},
+};
+use std::collections::{HashMap, VecDeque};
 
 pub struct PlayPlugin;
 
@@ -28,8 +31,68 @@ struct Token {
     idx: usize,
 }
 
+/// Where a token rests once its animation is done.
 #[derive(Component)]
 struct Target(Vec2);
+
+#[derive(Clone, Copy, PartialEq)]
+enum Kind {
+    /// One cell forward, with a small jump.
+    Hop,
+    /// Back to the yard after a capture, in a high arc.
+    Fly,
+    /// Arriving home: stay put and swell.
+    Pop,
+}
+
+/// One leg of a token's journey.
+#[derive(Clone, Copy)]
+struct Step {
+    to: Vec2,
+    kind: Kind,
+    /// Seconds to hold still before starting.
+    wait: f32,
+}
+
+impl Step {
+    fn secs(&self) -> f32 {
+        let ms = match self.kind {
+            Kind::Hop => HOP_MS,
+            Kind::Fly => FLY_MS,
+            Kind::Pop => POP_MS,
+        };
+        ms as f32 / 1000.0
+    }
+
+    fn arc(&self) -> f32 {
+        match self.kind {
+            Kind::Hop => CELL * 0.35,
+            Kind::Fly => CELL * 1.6,
+            Kind::Pop => 0.0,
+        }
+    }
+}
+
+struct Active {
+    step: Step,
+    from: Vec2,
+    /// Seconds since the step began; negative while waiting.
+    t: f32,
+}
+
+/// The steps a token still has to play, in order.
+#[derive(Component, Default)]
+struct Motion {
+    queue: VecDeque<Step>,
+    active: Option<Active>,
+}
+
+/// Soft shadow under a token; it stays on the ground while the token jumps.
+#[derive(Component)]
+struct Shadow;
+
+/// Queue length above which animations speed up so they never lag far behind.
+const BACKLOG: usize = 8;
 
 /// Highlight ring shown behind a token that can be moved.
 #[derive(Component)]
@@ -41,6 +104,7 @@ struct TokenAssets {
     outer: Handle<Mesh>,
     inner: Handle<Mesh>,
     dark: Handle<ColorMaterial>,
+    shadow: Handle<ColorMaterial>,
     glow: Handle<ColorMaterial>,
     players: [Handle<ColorMaterial>; 4],
 }
@@ -55,6 +119,7 @@ fn setup_assets(
         outer: meshes.add(Circle::new(CELL * 0.36)),
         inner: meshes.add(Circle::new(CELL * 0.27)),
         dark: mats.add(Color::srgb(0.08, 0.08, 0.1)),
+        shadow: mats.add(Color::srgba(0.0, 0.0, 0.0, 0.3)),
         glow: mats.add(Color::srgb(1.0, 1.0, 1.0)),
         players: ludo_core::Player::ALL.map(|p| mats.add(player_color(p))),
     });
@@ -113,17 +178,19 @@ fn token_targets(game: &Game) -> Vec<Vec<Vec2>> {
 /// Rebuild token entities for a new game; otherwise just retarget them.
 fn sync_tokens(
     mut commands: Commands,
-    session: Res<Session>,
+    mut session: ResMut<Session>,
     assets: Res<TokenAssets>,
     mut seen: Local<(u32, u32)>,
     existing: Query<Entity, With<Token>>,
-    mut targets: Query<(&Token, &mut Target, &mut Visibility)>,
+    mut targets: Query<(&Token, &mut Target, &mut Motion, &mut Visibility)>,
 ) {
     if *seen == (session.generation, session.rev) {
         return;
     }
     let new_game = seen.0 != session.generation;
     *seen = (session.generation, session.rev);
+    // Taking the events is not a change anyone else needs to hear about.
+    let events = std::mem::take(&mut session.bypass_change_detection().pending);
 
     if new_game {
         for e in &existing {
@@ -140,10 +207,18 @@ fn sync_tokens(
                     .spawn((
                         Token { seat, idx },
                         Target(p),
+                        Motion::default(),
                         Transform::from_xyz(p.x, p.y, 5.0),
                         Visibility::default(),
                     ))
                     .with_children(|t| {
+                        t.spawn((
+                            Shadow,
+                            Mesh2d(assets.outer.clone()),
+                            MeshMaterial2d(assets.shadow.clone()),
+                            Transform::from_xyz(0.0, -SHADOW_DROP, -0.2)
+                                .with_scale(Vec3::new(1.0, 0.55, 1.0)),
+                        ));
                         t.spawn((
                             Ring,
                             Mesh2d(assets.ring.clone()),
@@ -164,7 +239,8 @@ fn sync_tokens(
             }
         }
     } else {
-        for (token, mut target, mut visibility) in &mut targets {
+        queue_events(&events, game, &positions, &mut targets);
+        for (token, mut target, _, mut visibility) in &mut targets {
             target.0 = positions[token.seat][token.idx];
             // Players who left take their tokens with them.
             *visibility = if game.left[token.seat] {
@@ -174,22 +250,162 @@ fn sync_tokens(
             };
         }
     }
+    // Lock input from this very frame, before `animate_tokens` has run.
+    if targets
+        .iter()
+        .any(|(_, _, motion, _)| !motion.queue.is_empty())
+    {
+        session.animating = true;
+    }
+}
+
+/// Turn the game events of one update into steps on the tokens they concern.
+fn queue_events(
+    events: &[Event],
+    game: &Game,
+    positions: &[Vec<Vec2>],
+    tokens: &mut Query<(&Token, &mut Target, &mut Motion, &mut Visibility)>,
+) {
+    // Seconds into this batch at which the latest move finishes; a capture
+    // waits for the capturing token to land.
+    let mut clock = 0.0;
+    for event in events {
+        match *event {
+            Event::Moved {
+                seat,
+                token,
+                from,
+                to,
+            } => {
+                let Some(&player) = game.seats.get(seat) else {
+                    continue;
+                };
+                let mut steps: Vec<Step> = path(player, token, from, to)
+                    .into_iter()
+                    .map(|(c, r)| Step {
+                        to: cell_pos(c, r),
+                        kind: Kind::Hop,
+                        wait: 0.0,
+                    })
+                    .collect();
+                if to == HOME
+                    && let Some(last) = steps.last().copied()
+                {
+                    steps.push(Step {
+                        kind: Kind::Pop,
+                        ..last
+                    });
+                }
+                clock += steps.iter().map(Step::secs).sum::<f32>();
+                if let Some((_, _, mut motion, _)) = tokens
+                    .iter_mut()
+                    .find(|(t, ..)| t.seat == seat && t.idx == token)
+                {
+                    motion.queue.extend(steps);
+                }
+            }
+            Event::Captured { seat, token } => {
+                if let Some((_, _, mut motion, _)) = tokens
+                    .iter_mut()
+                    .find(|(t, ..)| t.seat == seat && t.idx == token)
+                {
+                    motion.queue.push_back(Step {
+                        to: positions[seat][token],
+                        kind: Kind::Fly,
+                        wait: clock,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Distance the shadow sits below a resting token.
+const SHADOW_DROP: f32 = CELL * 0.08;
+
+fn smooth(u: f32) -> f32 {
+    u * u * (3.0 - 2.0 * u)
 }
 
 fn animate_tokens(
     time: Res<Time>,
-    session: Res<Session>,
-    mut tokens: Query<(&Token, &Target, &mut Transform, &Children)>,
-    mut rings: Query<(&mut Visibility, &mut Transform), (With<Ring>, Without<Token>)>,
+    mut session: ResMut<Session>,
+    mut tokens: Query<(&Token, &Target, &mut Motion, &mut Transform, &Children)>,
+    mut rings: Query<
+        (&mut Visibility, &mut Transform),
+        (With<Ring>, Without<Token>, Without<Shadow>),
+    >,
+    mut shadows: Query<&mut Transform, (With<Shadow>, Without<Token>, Without<Ring>)>,
 ) {
+    let backlog: usize = tokens.iter().map(|(_, _, m, ..)| m.queue.len()).sum();
+    let speed = 1.0 + backlog.saturating_sub(BACKLOG) as f32 / BACKLOG as f32;
+    let dt = time.delta_secs() * speed;
     let ease = 1.0 - (-14.0 * time.delta_secs()).exp();
     let pulse = 1.0 + 0.12 * (time.elapsed_secs() * 6.0).sin();
     let clickable = session.clickable();
-    for (token, target, mut tf, children) in &mut tokens {
-        let cur = tf.translation.truncate();
-        let next = cur + (target.0 - cur) * ease;
-        tf.translation.x = next.x;
-        tf.translation.y = next.y;
+    let mut busy = false;
+
+    for (token, target, mut motion, mut tf, children) in &mut tokens {
+        if motion.active.is_none()
+            && let Some(step) = motion.queue.pop_front()
+        {
+            let from = tf.translation.truncate();
+            motion.active = Some(Active {
+                step,
+                from,
+                t: -step.wait,
+            });
+        }
+
+        let mut pos = tf.translation.truncate();
+        let (mut lift, mut scale, mut flying) = (0.0, Vec3::ONE, false);
+        let mut done = false;
+        if let Some(active) = &mut motion.active {
+            busy = true;
+            active.t += dt;
+            let secs = active.step.secs();
+            if active.t >= secs {
+                pos = active.step.to;
+                done = true;
+            } else if active.t < 0.0 {
+                pos = active.from;
+            } else {
+                let u = active.t / secs;
+                let arc = (u * std::f32::consts::PI).sin();
+                flying = true;
+                match active.step.kind {
+                    Kind::Hop => {
+                        pos = active.from.lerp(active.step.to, smooth(u));
+                        lift = active.step.arc() * arc;
+                        scale = Vec3::new(1.0 - 0.06 * arc, 1.0 + 0.12 * arc, 1.0);
+                        if u > 0.8 {
+                            // Squash on landing.
+                            let k = ((u - 0.8) / 0.2 * std::f32::consts::PI).sin() * 0.12;
+                            scale = Vec3::new(1.0 + k, 1.0 - k, 1.0);
+                        }
+                    }
+                    Kind::Fly => {
+                        pos = active.from.lerp(active.step.to, 1.0 - (1.0 - u).powi(2));
+                        lift = active.step.arc() * arc;
+                        scale = Vec3::splat(1.0 + 0.2 * arc);
+                    }
+                    Kind::Pop => {
+                        pos = active.step.to;
+                        scale = Vec3::splat(1.0 + 0.35 * arc);
+                    }
+                }
+            }
+        } else {
+            pos += (target.0 - pos) * ease;
+        }
+        if done {
+            motion.active = None;
+        }
+        busy |= !motion.queue.is_empty();
+
+        tf.translation = Vec3::new(pos.x, pos.y + lift, if flying { 6.0 } else { 5.0 });
+        tf.scale = scale;
 
         let active = clickable
             .as_ref()
@@ -203,7 +419,17 @@ fn animate_tokens(
                 };
                 ring_tf.scale = Vec3::splat(pulse);
             }
+            if let Ok(mut shadow_tf) = shadows.get_mut(*child) {
+                // Stay on the ground (undo the lift) and shrink as the token rises.
+                let shrink = (1.0 - lift / (CELL * 3.0)).max(0.5);
+                shadow_tf.translation.y = -SHADOW_DROP - lift;
+                shadow_tf.scale = Vec3::new(shrink, 0.55 * shrink, 1.0);
+            }
         }
+    }
+
+    if session.animating != busy {
+        session.animating = busy;
     }
 }
 

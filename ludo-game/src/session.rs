@@ -86,6 +86,10 @@ pub struct Session {
     pub you: Option<usize>,
     pub last_roll: Option<u8>,
     pub last_event: Option<String>,
+    /// Game events not yet handed to the token animations.
+    pub pending: Vec<Event>,
+    /// Tokens are still moving; the player cannot act until they land.
+    pub animating: bool,
     pub error: Option<String>,
     /// Seconds before the server plays the current turn, and a counter that
     /// changes whenever the server sends a fresh value.
@@ -129,6 +133,8 @@ impl Session {
             you: None,
             last_roll: None,
             last_event: None,
+            pending: Vec::new(),
+            animating: false,
             error: None,
             turn_secs: None,
             turn_rev: 0,
@@ -142,7 +148,9 @@ impl Session {
     /// Can the local user act on the current game state?
     pub fn can_act(&self) -> bool {
         self.game.as_ref().is_some_and(|g| {
-            g.phase() != Phase::Over && (!self.in_room || self.you == Some(g.turn))
+            g.phase() != Phase::Over
+                && !self.animating
+                && (!self.in_room || self.you == Some(g.turn))
         })
     }
 
@@ -316,6 +324,8 @@ impl Session {
         self.you = None;
         self.last_roll = None;
         self.last_event = None;
+        self.pending.clear();
+        self.animating = false;
         self.turn_secs = None;
         self.generation += 1;
         self.rev += 1;
@@ -324,6 +334,7 @@ impl Session {
     fn start_game(&mut self, game: Game) {
         self.game = Some(game);
         self.screen = Screen::Game;
+        self.pending.clear();
         self.last_event = None;
         self.last_roll = None;
         self.generation += 1;
@@ -436,6 +447,7 @@ impl Session {
     }
 
     fn apply_events(&mut self, events: Vec<Event>) {
+        self.pending.extend(events.iter().cloned());
         for e in &events {
             if let Event::Rolled { value, .. } = e {
                 self.last_roll = Some(*value);
