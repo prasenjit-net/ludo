@@ -4,16 +4,19 @@
 
 use crate::{
     board::{EXTENT, player_color},
-    session::{Action, CODE_LEN, Screen, Session},
+    session::{Action, Screen, Session},
 };
 use bevy::{
     camera::ScalingMode,
     color::Mix,
+    input_focus::tab_navigation::TabIndex,
     prelude::*,
+    text::{EditableText, TextCursorStyle, TextEdit},
     ui::{InteractionDisabled, Pressed, UiGlobalTransform},
-    ui_widgets::{Activate, Button, observe},
+    ui_widgets::{Activate, Button, TextInput, observe},
     window::PrimaryWindow,
 };
+use ludo_core::{Phase, Player};
 
 const BG: Color = Color::srgb(0.12, 0.12, 0.14);
 const PANEL: Color = Color::srgb(0.17, 0.17, 0.2);
@@ -32,11 +35,15 @@ impl Plugin for UiPlugin {
         app.add_systems(Startup, spawn_ui).add_systems(
             Update,
             (
+                (fill_inputs, read_inputs).chain(),
                 responsive_layout,
                 show_overlays,
                 sync_fields,
                 sync_slots,
-                sync_roll_button,
+                sync_rows,
+                sync_swatches,
+                sync_controls,
+                countdown,
                 button_look,
                 fit_board,
             ),
@@ -67,17 +74,30 @@ struct BoardArea;
 /// A text whose content comes from the session.
 #[derive(Component)]
 enum Field {
-    JoinCode,
     Error,
-    Room,
-    Wait,
+    ConnLine,
+    Empty,
+    Page,
+    ProfileName,
+    RowTitle(usize),
+    RowSub(usize),
+    RoomTitle,
+    RoomHint,
     Status,
     Event,
+    Timer,
     Die,
     Winner,
 }
 
-/// A player chip; `lobby` chips live in the lobby, the others in the game panel.
+/// A text box and what it edits.
+#[derive(Component, Clone, Copy, PartialEq)]
+enum Input {
+    Name,
+    RoomName,
+}
+
+/// A player chip; `lobby` chips live in the waiting room, the others in the game panel.
 #[derive(Component)]
 struct Slot {
     lobby: bool,
@@ -88,10 +108,42 @@ struct Slot {
 struct Dot;
 
 #[derive(Component)]
+struct ProfileDot;
+
+#[derive(Component)]
 struct SlotLabel;
+
+/// A colour choice button; `in_room` swatches change the colour in the waiting room.
+#[derive(Component)]
+struct Swatch {
+    player: Player,
+    in_room: bool,
+}
+
+/// One row of the room browser, and its Join button.
+#[derive(Component)]
+struct RoomRow(usize);
+
+#[derive(Component)]
+struct RowJoin(usize);
+
+/// "2 / 3 / 4 players" choice on the create screen.
+#[derive(Component)]
+struct Choice(u8);
 
 #[derive(Component)]
 struct RollButton;
+
+#[derive(Component)]
+struct StartButton;
+
+/// Shown only while offline.
+#[derive(Component)]
+struct RetryBar;
+
+/// Shown only when there is a profile to go back to.
+#[derive(Component)]
+struct BackBar;
 
 /// Resting colour of a button.
 #[derive(Component)]
@@ -110,7 +162,14 @@ fn label(text: impl Into<String>, size: f32, color: Color) -> impl Bundle {
     )
 }
 
-fn button(text: impl Into<String>, action: Action, primary: bool, height: f32) -> impl Bundle {
+/// A button; `width` is in vmin, or `None` to share the row equally.
+fn button_w(
+    text: impl Into<String>,
+    action: Action,
+    primary: bool,
+    height: f32,
+    width: Option<f32>,
+) -> impl Bundle {
     let (tint, fg) = if primary {
         (ACCENT, DARK)
     } else {
@@ -121,8 +180,9 @@ fn button(text: impl Into<String>, action: Action, primary: bool, height: f32) -
         Tint(tint),
         BackgroundColor(tint),
         Node {
-            flex_grow: 1.0,
-            flex_basis: px(0),
+            flex_grow: if width.is_some() { 0.0 } else { 1.0 },
+            flex_basis: if width.is_some() { auto() } else { px(0) },
+            width: width.map_or(auto(), vmin),
             height: vmin(height),
             justify_content: JustifyContent::Center,
             align_items: AlignItems::Center,
@@ -134,11 +194,16 @@ fn button(text: impl Into<String>, action: Action, primary: bool, height: f32) -
     )
 }
 
+fn button(text: impl Into<String>, action: Action, primary: bool, height: f32) -> impl Bundle {
+    button_w(text, action, primary, height, None)
+}
+
 fn row() -> Node {
     Node {
         width: percent(100),
         max_width: vmin(90),
         column_gap: vmin(2.0),
+        align_items: AlignItems::Center,
         justify_content: JustifyContent::Center,
         ..default()
     }
@@ -154,7 +219,7 @@ fn overlay(kind: Overlay, background: Color) -> impl Bundle {
             flex_direction: FlexDirection::Column,
             align_items: AlignItems::Center,
             justify_content: JustifyContent::Center,
-            row_gap: vmin(2.5),
+            row_gap: vmin(2.0),
             padding: UiRect::all(vmin(4.0)),
             ..default()
         },
@@ -165,6 +230,47 @@ fn overlay(kind: Overlay, background: Color) -> impl Bundle {
 
 fn heading(text: &str) -> impl Bundle {
     label(text.to_uppercase(), 3.2, MUTED)
+}
+
+fn text_input(kind: Input) -> impl Bundle {
+    (
+        kind,
+        TextInput,
+        // Needed for a tap to focus the box.
+        TabIndex(0),
+        EditableText {
+            allow_newlines: false,
+            ..default()
+        },
+        TextLayout::no_wrap(),
+        TextFont {
+            font_size: FontSize::VMin(5.0),
+            ..default()
+        },
+        TextColor(TEXT),
+        TextCursorStyle::default(),
+        Node {
+            width: percent(100),
+            max_width: vmin(90),
+            height: vmin(11),
+            padding: UiRect::axes(vmin(3.0), vmin(2.0)),
+            border: UiRect::all(vmin(0.6)),
+            border_radius: BorderRadius::all(vmin(2.0)),
+            overflow: Overflow::clip(),
+            ..default()
+        },
+        BackgroundColor(CHIP),
+        BorderColor::all(MUTED),
+    )
+}
+
+fn dot(size: f32) -> Node {
+    Node {
+        width: vmin(size),
+        height: vmin(size),
+        border_radius: BorderRadius::MAX,
+        ..default()
+    }
 }
 
 fn slot(lobby: bool, idx: usize) -> impl Bundle {
@@ -181,23 +287,106 @@ fn slot(lobby: bool, idx: usize) -> impl Bundle {
         BackgroundColor(CHIP),
         BorderColor::all(Color::NONE),
         children![
-            (
-                Dot,
-                Node {
-                    width: vmin(4.0),
-                    height: vmin(4.0),
-                    border_radius: BorderRadius::MAX,
-                    ..default()
-                },
-                BackgroundColor(Color::WHITE),
-            ),
-            (SlotLabel, label("", 3.4, TEXT)),
+            (Dot, dot(4.0), BackgroundColor(Color::WHITE)),
+            (SlotLabel, label("", 3.4, TEXT))
         ],
     )
 }
 
-fn key(digit: u8) -> impl Bundle {
-    button(digit.to_string(), Action::Digit(digit), false, 10.0)
+fn swatch(player: Player, in_room: bool) -> impl Bundle {
+    (
+        Button,
+        Swatch { player, in_room },
+        Node {
+            width: vmin(13.0),
+            height: vmin(13.0),
+            border: UiRect::all(vmin(1.0)),
+            border_radius: BorderRadius::all(vmin(2.5)),
+            ..default()
+        },
+        BackgroundColor(player_color(player)),
+        BorderColor::all(Color::NONE),
+        observe(move |_: On<Activate>, mut session: ResMut<Session>| {
+            session.apply(Action::PickColor(player))
+        }),
+    )
+}
+
+fn swatches(in_room: bool) -> impl Bundle {
+    (
+        Node {
+            column_gap: vmin(3.0),
+            justify_content: JustifyContent::Center,
+            ..default()
+        },
+        children![
+            swatch(Player::Red, in_room),
+            swatch(Player::Green, in_room),
+            swatch(Player::Yellow, in_room),
+            swatch(Player::Blue, in_room),
+        ],
+    )
+}
+
+fn choice(n: u8) -> impl Bundle {
+    (
+        Choice(n),
+        button(format!("{n} players"), Action::SetPlayers(n), false, 10.0),
+    )
+}
+
+fn room_row(i: usize) -> impl Bundle {
+    (
+        RoomRow(i),
+        Node {
+            width: percent(100),
+            max_width: vmin(90),
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::SpaceBetween,
+            column_gap: vmin(2.0),
+            padding: UiRect::axes(vmin(3.0), vmin(1.5)),
+            border_radius: BorderRadius::all(vmin(2.0)),
+            ..default()
+        },
+        BackgroundColor(PANEL),
+        children![
+            (
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    flex_shrink: 1.0,
+                    ..default()
+                },
+                children![
+                    (Field::RowTitle(i), label("", 4.4, TEXT)),
+                    (Field::RowSub(i), label("", 3.0, MUTED))
+                ],
+            ),
+            (
+                RowJoin(i),
+                button_w("Join", Action::JoinRow(i), true, 8.0, Some(20.0))
+            ),
+        ],
+    )
+}
+
+fn profile_chip() -> impl Bundle {
+    (
+        Button,
+        Tint(BUTTON),
+        BackgroundColor(BUTTON),
+        Node {
+            align_items: AlignItems::Center,
+            column_gap: vmin(1.5),
+            padding: UiRect::axes(vmin(2.5), vmin(1.5)),
+            border_radius: BorderRadius::all(vmin(2.0)),
+            ..default()
+        },
+        observe(|_: On<Activate>, mut session: ResMut<Session>| session.apply(Action::OpenProfile)),
+        children![
+            (ProfileDot, dot(4.0), BackgroundColor(Color::WHITE)),
+            (Field::ProfileName, label("", 3.6, TEXT))
+        ],
+    )
 }
 
 // ---- setup ------------------------------------------------------------------
@@ -218,6 +407,9 @@ fn spawn_ui(mut commands: Commands) {
                 Node {
                     aspect_ratio: Some(1.0),
                     flex_shrink: 1.0,
+                    // Without this the aspect ratio forbids shrinking below a square.
+                    min_width: px(0),
+                    min_height: px(0),
                     ..default()
                 },
             ),
@@ -267,78 +459,124 @@ fn spawn_ui(mut commands: Commands) {
                         ],
                     ),
                     (Field::Status, label("", 4.6, TEXT)),
+                    (Field::Timer, label("", 3.4, ACCENT)),
                     (Field::Event, label("", 3.4, MUTED)),
                     (
                         row(),
-                        children![button("Leave game", Action::Menu, false, 8.0)]
+                        children![button("Leave game", Action::Leave, false, 8.0)]
                     ),
                 ],
             ),
         ],
     ));
 
+    // Profile: name and colour.
     commands.spawn((
-        overlay(Overlay::Screen(Screen::Menu), BG),
+        overlay(Overlay::Screen(Screen::Profile), BG),
         children![
-            label("LUDO", 14.0, ACCENT),
-            heading("Play on this screen"),
+            label("YOUR PROFILE", 7.0, ACCENT),
+            heading("Name"),
+            text_input(Input::Name),
+            heading("Colour"),
+            swatches(false),
+            (
+                row(),
+                children![button("Continue", Action::SaveProfile, true, 11.0)]
+            ),
+            (
+                BackBar,
+                row(),
+                children![button("Back", Action::Back, false, 8.0)]
+            ),
+            (Field::Error, label("", 3.4, ERROR)),
+        ],
+    ));
+
+    // Room browser: the first screen.
+    commands.spawn((
+        overlay(Overlay::Screen(Screen::Rooms), BG),
+        children![
+            (
+                Node {
+                    width: percent(100),
+                    max_width: vmin(90),
+                    align_items: AlignItems::Center,
+                    justify_content: JustifyContent::SpaceBetween,
+                    ..default()
+                },
+                children![label("ROOMS", 7.0, ACCENT), profile_chip()],
+            ),
+            (Field::Empty, label("", 3.6, MUTED)),
+            room_row(0),
+            room_row(1),
+            room_row(2),
             (
                 row(),
                 children![
-                    button("2 players", Action::Local(2), true, 11.0),
-                    button("3 players", Action::Local(3), true, 11.0),
-                    button("4 players", Action::Local(4), true, 11.0),
+                    button_w("<", Action::PagePrev, false, 7.0, Some(14.0)),
+                    (Field::Page, label("", 3.6, MUTED)),
+                    button_w(">", Action::PageNext, false, 7.0, Some(14.0)),
                 ],
             ),
-            heading("Play online"),
+            (Field::ConnLine, label("", 3.4, MUTED)),
+            (
+                RetryBar,
+                row(),
+                children![button("Retry now", Action::Retry, false, 7.0)]
+            ),
+            (
+                row(),
+                children![button("Create a room", Action::OpenCreate, true, 10.0)]
+            ),
+            heading("Same screen"),
             (
                 row(),
                 children![
-                    button("Host 2", Action::Create(2), false, 11.0),
-                    button("Host 3", Action::Create(3), false, 11.0),
-                    button("Host 4", Action::Create(4), false, 11.0),
+                    button("2 players", Action::Local(2), false, 8.0),
+                    button("3 players", Action::Local(3), false, 8.0),
+                    button("4 players", Action::Local(4), false, 8.0),
                 ],
-            ),
-            (
-                row(),
-                children![button("Join a room", Action::OpenJoin, false, 11.0)]
             ),
             (Field::Error, label("", 3.4, ERROR)),
         ],
     ));
 
     commands.spawn((
-        overlay(Overlay::Screen(Screen::Join), BG),
+        overlay(Overlay::Screen(Screen::Create), BG),
         children![
-            heading("Enter room code"),
-            (Field::JoinCode, label("", 13.0, ACCENT)),
-            (Field::Error, label("", 3.4, ERROR)),
-            (row(), children![key(1), key(2), key(3)]),
-            (row(), children![key(4), key(5), key(6)]),
-            (row(), children![key(7), key(8), key(9)]),
+            label("NEW ROOM", 7.0, ACCENT),
+            heading("Room name"),
+            text_input(Input::RoomName),
+            heading("Players allowed"),
+            (row(), children![choice(2), choice(3), choice(4)]),
             (
                 row(),
-                children![
-                    button("<", Action::Backspace, false, 10.0),
-                    key(0),
-                    button("OK", Action::Join, true, 10.0),
-                ],
+                children![button("Create", Action::CreateRoom, true, 11.0)]
             ),
-            (row(), children![button("Back", Action::Menu, false, 8.0)]),
+            (row(), children![button("Back", Action::Back, false, 8.0)]),
+            (Field::Error, label("", 3.4, ERROR)),
         ],
     ));
 
+    // Waiting room.
     commands.spawn((
-        overlay(Overlay::Screen(Screen::Lobby), BG),
+        overlay(Overlay::Screen(Screen::Room), BG),
         children![
-            heading("Room code: share it"),
-            (Field::Room, label("", 16.0, ACCENT)),
+            (Field::RoomTitle, label("", 6.0, ACCENT)),
             slot(true, 0),
             slot(true, 1),
             slot(true, 2),
             slot(true, 3),
-            (Field::Wait, label("", 3.6, MUTED)),
-            (row(), children![button("Leave", Action::Menu, false, 9.0)]),
+            heading("Your colour"),
+            swatches(true),
+            (Field::RoomHint, label("", 3.6, MUTED)),
+            (
+                StartButton,
+                row(),
+                children![button("Start game", Action::Start, true, 11.0)]
+            ),
+            (row(), children![button("Leave", Action::Leave, false, 8.0)]),
+            (Field::Error, label("", 3.4, ERROR)),
         ],
     ));
 
@@ -348,13 +586,49 @@ fn spawn_ui(mut commands: Commands) {
             (Field::Winner, label("", 9.0, ACCENT)),
             (
                 row(),
-                children![button("Back to menu", Action::Menu, true, 11.0)]
+                children![button("Back to rooms", Action::Leave, true, 11.0)]
             ),
         ],
     ));
 }
 
 // ---- systems ----------------------------------------------------------------
+
+/// Put the draft text into the box when its screen opens.
+fn fill_inputs(
+    session: Res<Session>,
+    mut inputs: Query<(&Input, &mut EditableText)>,
+    mut shown: Local<Option<Screen>>,
+) {
+    if *shown == Some(session.screen) {
+        return;
+    }
+    *shown = Some(session.screen);
+    for (kind, mut text) in &mut inputs {
+        let value = match (kind, session.screen) {
+            (Input::Name, Screen::Profile) => &session.name_draft,
+            (Input::RoomName, Screen::Create) => &session.room_draft,
+            _ => continue,
+        };
+        text.editor_mut().set_text(value);
+        text.queue_edit(TextEdit::TextEnd(false));
+    }
+}
+
+/// Copy what the user typed back into the session (without waking the other UI systems).
+fn read_inputs(
+    mut session: ResMut<Session>,
+    inputs: Query<(&Input, &EditableText), Changed<EditableText>>,
+) {
+    for (kind, text) in &inputs {
+        let value = text.value().to_string();
+        let session = session.bypass_change_detection();
+        match kind {
+            Input::Name => session.name_draft = value,
+            Input::RoomName => session.room_draft = value,
+        }
+    }
+}
 
 /// Portrait: board on top, panel below. Landscape: board left, panel right.
 fn responsive_layout(
@@ -407,37 +681,84 @@ fn show_overlays(session: Res<Session>, mut overlays: Query<(&Overlay, &mut Node
     }
 }
 
-fn sync_fields(session: Res<Session>, mut fields: Query<(&Field, &mut Text)>) {
+fn sync_fields(
+    session: Res<Session>,
+    mut fields: Query<(&Field, &mut Text)>,
+    mut dots: Query<&mut BackgroundColor, With<ProfileDot>>,
+) {
     if !session.is_changed() {
         return;
     }
+    for mut dot in &mut dots {
+        dot.0 = player_color(session.profile.color);
+    }
     for (field, mut text) in &mut fields {
-        **text = match field {
-            Field::JoinCode => (0..CODE_LEN)
-                .map(|i| session.join_code.chars().nth(i).unwrap_or('_').to_string())
-                .collect::<Vec<_>>()
-                .join(" "),
+        let value = match field {
             Field::Error => session.error.clone().unwrap_or_default(),
-            Field::Room => session.room.clone().unwrap_or_default(),
-            Field::Wait => {
-                let missing = session.capacity.saturating_sub(session.players.len());
-                format!("Waiting for {missing} more...")
-            }
+            Field::ConnLine => match (session.connected, session.reconnect_in) {
+                (true, _) => String::new(),
+                (false, Some(_)) => "Offline - trying to reconnect...".into(),
+                (false, None) => "Connecting...".into(),
+            },
+            Field::Empty => match (session.connected, session.rooms.is_empty()) {
+                (true, true) => "No open rooms yet. Create one!".into(),
+                _ => String::new(),
+            },
+            Field::Page => format!("{} / {}", session.page + 1, session.page_count()),
+            Field::ProfileName => session.profile.name.clone(),
+            Field::RowTitle(i) => session.row(*i).map(|r| r.name.clone()).unwrap_or_default(),
+            Field::RowSub(i) => session
+                .row(*i)
+                .map(|r| {
+                    let state = if r.playing {
+                        "In game"
+                    } else if r.joined >= r.capacity {
+                        "Full"
+                    } else {
+                        "Waiting"
+                    };
+                    format!("{} - {}/{} players - {state}", r.host, r.joined, r.capacity)
+                })
+                .unwrap_or_default(),
+            Field::RoomTitle => session
+                .room
+                .as_ref()
+                .map(|r| r.name.clone())
+                .unwrap_or_default(),
+            Field::RoomHint => match (&session.room, session.is_host()) {
+                (Some(_), false) => "Waiting for the host to start".into(),
+                (Some(_), true) if session.players.len() < 2 => {
+                    "Waiting for another player to join".into()
+                }
+                (Some(_), true) => "Start now, or wait for more players".into(),
+                _ => String::new(),
+            },
             Field::Status => session.status(),
             Field::Event => session.last_event.clone().unwrap_or_default(),
             Field::Die => session.die().map_or("-".into(), |d| d.to_string()),
             Field::Winner => session
                 .winner()
                 .map_or(String::new(), |s| format!("{} wins!", session.name(s))),
+            Field::Timer => continue,
         };
+        **text = value;
     }
 }
 
 fn sync_slots(
     session: Res<Session>,
-    mut slots: Query<(&Slot, &mut Node, &mut BorderColor, &Children)>,
+    mut slots: Query<
+        (
+            &Slot,
+            &mut Node,
+            &mut BorderColor,
+            &mut BackgroundColor,
+            &Children,
+        ),
+        Without<Dot>,
+    >,
     mut dots: Query<&mut BackgroundColor, With<Dot>>,
-    mut labels: Query<&mut Text, With<SlotLabel>>,
+    mut labels: Query<(&mut Text, &mut TextColor), With<SlotLabel>>,
 ) {
     if !session.is_changed() {
         return;
@@ -447,43 +768,80 @@ fn sync_slots(
         .as_ref()
         .filter(|g| g.winner.is_none())
         .map(|g| g.turn);
-    for (slot, mut node, mut border, children) in &mut slots {
-        let Some(player) = session.players.get(slot.idx) else {
+    let capacity = session.room.as_ref().map_or(0, |r| r.capacity);
+    for (slot, mut node, mut border, mut background, children) in &mut slots {
+        let player = session.players.get(slot.idx);
+        // Waiting rooms also show the open seats.
+        if player.is_none() && !(slot.lobby && slot.idx < capacity) {
             node.display = Display::None;
             continue;
-        };
+        }
         node.display = Display::Flex;
+        let left = session
+            .game
+            .as_ref()
+            .is_some_and(|g| g.left.get(slot.idx).copied().unwrap_or(false));
         let active = !slot.lobby && turn == Some(slot.idx);
         *border = BorderColor::all(if active { ACCENT } else { Color::NONE });
+        background.0 = if left { CHIP.mix(&PANEL, 0.5) } else { CHIP };
 
-        let mut name = player.player.name().to_string();
-        if session.online && session.you == Some(slot.idx) {
-            name.push_str(" (you)");
-        }
-        if !player.connected {
-            name.push_str(" (left)");
+        let (mut name, color, text_color) = match player {
+            Some(p) => (
+                p.name.clone(),
+                player_color(p.player),
+                if left { MUTED } else { TEXT },
+            ),
+            None => ("Open seat".to_string(), BUTTON, MUTED),
+        };
+        if let Some(p) = player {
+            if slot.lobby && session.room.as_ref().is_some_and(|r| r.host == slot.idx) {
+                name.push_str(" (host)");
+            }
+            if session.in_room && session.you == Some(slot.idx) {
+                name.push_str(" (you)");
+            }
+            if left {
+                name.push_str(" (left)");
+            } else if !p.connected {
+                name.push_str(" (away)");
+            }
         }
         for child in children {
             if let Ok(mut dot) = dots.get_mut(*child) {
-                dot.0 = player_color(player.player);
+                dot.0 = color;
             }
-            if let Ok(mut text) = labels.get_mut(*child) {
+            if let Ok((mut text, mut tc)) = labels.get_mut(*child) {
                 **text = name.clone();
+                tc.0 = text_color;
             }
         }
     }
 }
 
-fn sync_roll_button(
+/// Room browser rows: visible when there is a room on that row, Join enabled when it can be joined.
+fn sync_rows(
     mut commands: Commands,
     session: Res<Session>,
-    roll: Query<(Entity, Has<InteractionDisabled>), With<RollButton>>,
+    mut rows: Query<(&RoomRow, &mut Visibility)>,
+    joins: Query<(Entity, &RowJoin, Has<InteractionDisabled>)>,
 ) {
     if !session.is_changed() {
         return;
     }
-    for (entity, disabled) in &roll {
-        match (session.can_roll(), disabled) {
+    // Empty rows keep their space so the pager does not jump between pages.
+    for (row, mut visibility) in &mut rows {
+        *visibility = if session.row(row.0).is_some() {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+    }
+    for (entity, join, disabled) in &joins {
+        let joinable = session.connected
+            && session
+                .row(join.0)
+                .is_some_and(|r| !r.playing && r.joined < r.capacity);
+        match (joinable, disabled) {
             (true, true) => {
                 commands.entity(entity).remove::<InteractionDisabled>();
             }
@@ -491,6 +849,144 @@ fn sync_roll_button(
                 commands.entity(entity).insert(InteractionDisabled);
             }
             _ => {}
+        }
+    }
+}
+
+/// Mark the chosen colour; in the waiting room, dim colours other players hold.
+fn sync_swatches(
+    session: Res<Session>,
+    mut swatches: Query<(&Swatch, &mut BorderColor, &mut BackgroundColor)>,
+) {
+    if !session.is_changed() {
+        return;
+    }
+    for (swatch, mut border, mut background) in &mut swatches {
+        let (selected, taken) = if swatch.in_room {
+            let mine = session
+                .you
+                .and_then(|y| session.players.get(y))
+                .map(|p| p.player);
+            let taken = session.players.iter().any(|p| p.player == swatch.player)
+                && mine != Some(swatch.player);
+            (mine == Some(swatch.player), taken)
+        } else {
+            (session.color_draft == swatch.player, false)
+        };
+        *border = BorderColor::all(if selected { TEXT } else { Color::NONE });
+        let base = player_color(swatch.player);
+        background.0 = if taken { base.mix(&BG, 0.7) } else { base };
+    }
+}
+
+/// Buttons and bars whose state depends on the session.
+#[allow(clippy::too_many_arguments)]
+fn sync_controls(
+    mut commands: Commands,
+    session: Res<Session>,
+    roll: Query<(Entity, Has<InteractionDisabled>), With<RollButton>>,
+    start: Query<(Entity, &Children), With<StartButton>>,
+    start_buttons: Query<Has<InteractionDisabled>, With<Button>>,
+    mut nodes: ParamSet<(
+        Query<&mut Node, With<RetryBar>>,
+        Query<&mut Node, With<BackBar>>,
+        Query<&mut Node, With<StartButton>>,
+    )>,
+    mut choices: Query<(&Choice, &mut Tint)>,
+) {
+    if !session.is_changed() {
+        return;
+    }
+    set_disabled(&mut commands, roll.iter(), !session.can_roll());
+    for mut n in &mut nodes.p0() {
+        n.display = if session.connected {
+            Display::None
+        } else {
+            Display::Flex
+        };
+    }
+    for mut n in &mut nodes.p1() {
+        n.display = if session.has_profile {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
+    for mut n in &mut nodes.p2() {
+        n.display = if session.is_host() {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
+    for (_, children) in &start {
+        for child in children {
+            if let Ok(disabled) = start_buttons.get(*child) {
+                set_disabled(
+                    &mut commands,
+                    [(*child, disabled)],
+                    session.players.len() < 2,
+                );
+            }
+        }
+    }
+    for (choice, mut tint) in &mut choices {
+        tint.0 = if choice.0 == session.create_players {
+            ACCENT
+        } else {
+            BUTTON
+        };
+    }
+}
+
+fn set_disabled(
+    commands: &mut Commands,
+    buttons: impl IntoIterator<Item = (Entity, bool)>,
+    want: bool,
+) {
+    for (entity, disabled) in buttons {
+        match (want, disabled) {
+            (false, true) => {
+                commands.entity(entity).remove::<InteractionDisabled>();
+            }
+            (true, false) => {
+                commands.entity(entity).insert(InteractionDisabled);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Count down to the server's automatic turn, and show it.
+fn countdown(
+    time: Res<Time>,
+    session: Res<Session>,
+    mut fields: Query<(&Field, &mut Text)>,
+    mut state: Local<(u32, Option<f32>, Option<i32>)>,
+) {
+    if state.0 != session.turn_rev {
+        state.0 = session.turn_rev;
+        state.1 = session.turn_secs;
+    }
+    if let Some(left) = &mut state.1 {
+        *left -= time.delta_secs();
+    }
+    let running = session.in_room
+        && session
+            .game
+            .as_ref()
+            .is_some_and(|g| g.phase() != Phase::Over);
+    let secs = if running {
+        state.1.map(|l| l.max(0.0).ceil() as i32)
+    } else {
+        None
+    };
+    if secs != state.2 {
+        state.2 = secs;
+        for (field, mut text) in &mut fields {
+            if matches!(field, Field::Timer) {
+                **text = secs.map_or(String::new(), |s| format!("Auto-play in {s}s"));
+            }
         }
     }
 }

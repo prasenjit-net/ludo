@@ -1,4 +1,4 @@
-.PHONY: all game server run dev check test clean
+.PHONY: all game server run dev check test e2e clean
 
 all: server
 
@@ -21,6 +21,10 @@ dev:
 # Rules engine and server unit tests.
 test:
 	cargo test -p ludo-core -p server
+
+# Room, host, leave, timer and reconnect behaviour against a real server (needs Node 22+).
+e2e:
+	./server/tests/run-e2e.sh
 
 check:
 	cargo check -p server

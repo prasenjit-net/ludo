@@ -1,4 +1,4 @@
-mod rooms;
+mod hub;
 
 use axum::{
     Router,
@@ -12,10 +12,11 @@ use axum::{
     routing::get,
 };
 use futures_util::{SinkExt, StreamExt};
+use hub::Hub;
 use ludo_core::protocol::{ClientMsg, ServerMsg};
-use rooms::Rooms;
 use rust_embed::RustEmbed;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tower_http::compression::CompressionLayer;
 
@@ -29,11 +30,24 @@ static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
 #[tokio::main]
 async fn main() {
     let addr = std::env::var("LUDO_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".into());
+    let turn_ms: u64 = std::env::var("LUDO_TURN_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10_000);
+    let hub = Hub::new(Duration::from_millis(turn_ms));
+    let ticker = hub.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(250));
+        loop {
+            interval.tick().await;
+            ticker.tick();
+        }
+    });
     let app = Router::new()
         .route("/ws", get(ws_upgrade))
         .fallback(get(serve_static))
         .layer(CompressionLayer::new())
-        .with_state(Rooms::default());
+        .with_state(hub.clone());
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .expect("bind address");
@@ -41,11 +55,11 @@ async fn main() {
     axum::serve(listener, app).await.expect("server error");
 }
 
-async fn ws_upgrade(ws: WebSocketUpgrade, State(rooms): State<Rooms>) -> Response {
-    ws.on_upgrade(move |socket| connection(socket, rooms))
+async fn ws_upgrade(ws: WebSocketUpgrade, State(hub): State<Hub>) -> Response {
+    ws.on_upgrade(move |socket| connection(socket, hub))
 }
 
-async fn connection(socket: WebSocket, rooms: Rooms) {
+async fn connection(socket: WebSocket, hub: Hub) {
     let conn = NEXT_CONN.fetch_add(1, Ordering::Relaxed);
     let (mut sink, mut stream) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerMsg>();
@@ -59,7 +73,6 @@ async fn connection(socket: WebSocket, rooms: Rooms) {
         }
     });
 
-    let mut room: Option<String> = None;
     while let Some(Ok(frame)) = stream.next().await {
         let text = match frame {
             Message::Text(t) => t,
@@ -69,27 +82,26 @@ async fn connection(socket: WebSocket, rooms: Rooms) {
         let Ok(msg) = serde_json::from_str::<ClientMsg>(text.as_str()) else {
             continue;
         };
-        match (msg, &room) {
-            (ClientMsg::Create { players }, None) => {
-                room = rooms.create(conn, tx.clone(), players);
-            }
-            (ClientMsg::Join { code }, None) => {
-                room = rooms.join(conn, tx.clone(), &code);
-            }
-            (ClientMsg::Roll, Some(code)) => {
+        match msg {
+            ClientMsg::Hello {
+                client_id,
+                name,
+                color,
+            } => hub.hello(conn, tx.clone(), client_id, name, color),
+            ClientMsg::CreateRoom { name, players } => hub.create_room(conn, &name, players),
+            ClientMsg::JoinRoom { id } => hub.join_room(conn, id),
+            ClientMsg::SetColor { color } => hub.set_color(conn, color),
+            ClientMsg::StartGame => hub.start(conn),
+            ClientMsg::LeaveRoom => hub.leave(conn),
+            ClientMsg::Roll => {
                 let value = rand::Rng::random_range(&mut rand::rng(), 1..=6);
-                rooms.act(code, conn, &tx, |g| g.roll(value));
+                hub.act(conn, |g| g.roll(value));
             }
-            (ClientMsg::Play { token }, Some(code)) => {
-                rooms.act(code, conn, &tx, |g| g.play(token));
-            }
-            _ => {}
+            ClientMsg::Play { token } => hub.act(conn, |g| g.play(token)),
         }
     }
 
-    if let Some(code) = room {
-        rooms.disconnect(&code, conn);
-    }
+    hub.disconnect(conn);
     writer.abort();
 }
 

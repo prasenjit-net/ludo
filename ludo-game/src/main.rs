@@ -2,6 +2,7 @@ mod board;
 mod net;
 mod play;
 mod session;
+mod store;
 mod ui;
 
 use bevy::prelude::*;

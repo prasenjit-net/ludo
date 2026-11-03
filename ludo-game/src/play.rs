@@ -60,10 +60,24 @@ fn setup_assets(
     });
 }
 
-/// Feed server messages into the session (only marks it changed when there are some).
-fn pump(mut session: ResMut<Session>) {
+/// Connect on start (once there is a profile), feed server messages into the
+/// session and retry dropped connections. The session is only marked changed
+/// when something actually happens.
+fn pump(mut session: ResMut<Session>, time: Res<Time>, mut booted: Local<bool>) {
+    if !*booted {
+        *booted = true;
+        if session.has_profile {
+            session.connect();
+        }
+    }
     for ev in net::poll() {
         session.handle_net(ev);
+    }
+    if let Some(left) = session.bypass_change_detection().reconnect_in.as_mut() {
+        *left -= time.delta_secs();
+        if *left <= 0.0 {
+            session.connect();
+        }
     }
 }
 
@@ -103,7 +117,7 @@ fn sync_tokens(
     assets: Res<TokenAssets>,
     mut seen: Local<(u32, u32)>,
     existing: Query<Entity, With<Token>>,
-    mut targets: Query<(&Token, &mut Target)>,
+    mut targets: Query<(&Token, &mut Target, &mut Visibility)>,
 ) {
     if *seen == (session.generation, session.rev) {
         return;
@@ -151,8 +165,14 @@ fn sync_tokens(
             }
         }
     } else {
-        for (token, mut target) in &mut targets {
+        for (token, mut target, mut visibility) in &mut targets {
             target.0 = positions[token.seat][token.idx];
+            // Players who left take their tokens with them.
+            *visibility = if game.left[token.seat] {
+                Visibility::Hidden
+            } else {
+                Visibility::Inherited
+            };
         }
     }
 }

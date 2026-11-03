@@ -110,6 +110,10 @@ pub enum Event {
     Turn {
         seat: usize,
     },
+    /// The player left the game; their tokens are removed.
+    Left {
+        seat: usize,
+    },
     Won {
         seat: usize,
     },
@@ -138,6 +142,8 @@ pub struct Game {
     pub seats: Vec<Player>,
     /// Progress of each seat's four tokens.
     pub tokens: Vec<[i8; TOKENS]>,
+    /// Seats whose player has left; they are skipped and their tokens are gone.
+    pub left: Vec<bool>,
     pub turn: usize,
     /// Rolled value waiting for a token to be chosen.
     pub dice: Option<u8>,
@@ -149,8 +155,16 @@ pub struct Game {
 impl Game {
     pub fn new(seats: Vec<Player>) -> Self {
         assert!((2..=4).contains(&seats.len()), "Ludo needs 2 to 4 players");
+        assert!(
+            seats
+                .iter()
+                .enumerate()
+                .all(|(i, p)| !seats[..i].contains(p)),
+            "players must be distinct"
+        );
         Game {
             tokens: vec![[YARD; TOKENS]; seats.len()],
+            left: vec![false; seats.len()],
             seats,
             turn: 0,
             dice: None,
@@ -240,7 +254,7 @@ impl Game {
         if let Some(cell) = track_cell(player, to)
             && !is_safe(cell)
         {
-            for other in (0..self.seats.len()).filter(|&s| s != seat) {
+            for other in (0..self.seats.len()).filter(|&s| s != seat && !self.left[s]) {
                 for t in 0..TOKENS {
                     if track_cell(self.seats[other], self.tokens[other][t]) == Some(cell) {
                         self.tokens[other][t] = YARD;
@@ -272,10 +286,65 @@ impl Game {
         Ok(events)
     }
 
+    /// A player leaves: their tokens vanish and play continues without them.
+    /// The last player remaining wins.
+    pub fn leave(&mut self, seat: usize) -> Vec<Event> {
+        if seat >= self.seats.len() || self.left[seat] || self.winner.is_some() {
+            return Vec::new();
+        }
+        self.left[seat] = true;
+        self.tokens[seat] = [YARD; TOKENS];
+        let mut events = vec![Event::Left { seat }];
+        let remaining: Vec<usize> = (0..self.seats.len()).filter(|&s| !self.left[s]).collect();
+        if let [last] = remaining[..] {
+            self.winner = Some(last);
+            self.dice = None;
+            events.push(Event::Won { seat: last });
+        } else if self.turn == seat {
+            self.end_turn(&mut events);
+        }
+        events
+    }
+
+    /// The token a hands-off player should move: capture, then reach home,
+    /// then leave the yard, then advance the furthest token.
+    pub fn auto_move(&self) -> Option<usize> {
+        let dice = self.dice?;
+        let (seat, player) = (self.turn, self.current());
+        self.movable().into_iter().max_by_key(|&t| {
+            let to = self.destination(seat, t, dice).unwrap_or(YARD);
+            let captures = track_cell(player, to).is_some_and(|cell| {
+                !is_safe(cell)
+                    && (0..self.seats.len()).any(|o| {
+                        o != seat
+                            && !self.left[o]
+                            && self.tokens[o]
+                                .iter()
+                                .any(|&p| track_cell(self.seats[o], p) == Some(cell))
+                    })
+            });
+            let priority = if captures {
+                4
+            } else if to == HOME {
+                3
+            } else if self.tokens[seat][t] == YARD {
+                2
+            } else {
+                1
+            };
+            (priority * 100 + to as i32, std::cmp::Reverse(t))
+        })
+    }
+
     fn end_turn(&mut self, events: &mut Vec<Event>) {
         self.sixes = 0;
         self.dice = None;
-        self.turn = (self.turn + 1) % self.seats.len();
+        loop {
+            self.turn = (self.turn + 1) % self.seats.len();
+            if !self.left[self.turn] {
+                break;
+            }
+        }
         events.push(Event::Turn { seat: self.turn });
     }
 }
@@ -364,5 +433,66 @@ mod tests {
         g.roll(6).unwrap();
         assert_eq!(g.roll(2), Err(Error::WrongPhase));
         assert_eq!(g.play(9), Err(Error::IllegalMove));
+    }
+
+    #[test]
+    fn leaving_removes_player_and_skips_turns() {
+        let mut g = game(); // Red, Green, Yellow, Blue
+        g.tokens[1] = [10, YARD, YARD, YARD];
+        let ev = g.leave(1);
+        assert_eq!(ev, vec![Event::Left { seat: 1 }]);
+        assert_eq!(g.tokens[1], [YARD; 4]);
+        g.roll(2).unwrap(); // red, no moves -> next active seat skips green
+        assert_eq!(g.turn, 2);
+    }
+
+    #[test]
+    fn leaving_on_your_turn_passes_the_turn() {
+        let mut g = game();
+        let ev = g.leave(0);
+        assert!(ev.contains(&Event::Turn { seat: 1 }));
+        assert_eq!(g.turn, 1);
+        assert_eq!(g.leave(0), vec![], "leaving twice does nothing");
+    }
+
+    #[test]
+    fn last_player_standing_wins() {
+        let mut g = Game::new(Player::for_count(2));
+        let ev = g.leave(0);
+        assert!(ev.contains(&Event::Won { seat: 1 }));
+        assert_eq!(g.phase(), Phase::Over);
+        assert_eq!(g.roll(3), Err(Error::WrongPhase));
+
+        let mut g = Game::new(Player::for_count(3));
+        g.leave(2);
+        assert_eq!(g.phase(), Phase::Roll, "two players remain, game goes on");
+    }
+
+    #[test]
+    fn auto_move_prefers_capture_then_home_then_yard() {
+        let mut g = game();
+        g.tokens[0] = [4, 20, YARD, YARD];
+        g.tokens[1][0] = 44; // green on cell 5
+        g.roll(1).unwrap();
+        assert_eq!(g.auto_move(), Some(0), "capture beats advancing");
+
+        let mut g = game();
+        g.tokens[0] = [55, 20, YARD, YARD];
+        g.roll(1).unwrap();
+        assert_eq!(g.auto_move(), Some(0), "reaching home beats advancing");
+
+        let mut g = game();
+        g.tokens[0] = [30, YARD, YARD, YARD];
+        g.roll(6).unwrap();
+        assert_eq!(
+            g.auto_move(),
+            Some(1),
+            "leaving the yard beats advancing on a six"
+        );
+        assert_eq!(
+            Game::new(Player::for_count(2)).auto_move(),
+            None,
+            "needs a roll first"
+        );
     }
 }
