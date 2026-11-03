@@ -1,6 +1,6 @@
 //! Board geometry on a 15x15 grid. Cells are `(col, row)` with row 0 at the top.
 
-use crate::{HOME, LAST_TRACK, Player, YARD, track_cell};
+use crate::{Event, HOME, LAST_TRACK, Player, YARD, track_cell};
 
 pub const GRID: i32 = 15;
 
@@ -75,6 +75,48 @@ pub fn token_pos(player: Player, token: usize, progress: i8) -> (f32, f32) {
     }
 }
 
+/// How long one hop of a token takes on screen, in milliseconds. The client
+/// animates with these and the server paces bot turns by them.
+pub const HOP_MS: u64 = 120;
+/// The dice tumbling and settling on its value.
+pub const ROLL_MS: u64 = 650;
+/// A captured token flying back to its yard.
+pub const FLY_MS: u64 = 450;
+/// The pop of a token arriving home.
+pub const POP_MS: u64 = 250;
+
+/// Waypoints (grid positions) a token passes through when it goes from
+/// progress `from` to `to`, one per cell, excluding where it starts. Leaving
+/// the yard and being sent back to it are a single jump.
+pub fn path(player: Player, token: usize, from: i8, to: i8) -> Vec<(f32, f32)> {
+    if from == YARD || to <= from {
+        return vec![token_pos(player, token, to)];
+    }
+    ((from + 1)..=to)
+        .map(|p| token_pos(player, token, p))
+        .collect()
+}
+
+/// Time the client needs to animate these events, in milliseconds.
+pub fn animation_ms(events: &[Event]) -> u64 {
+    events
+        .iter()
+        .map(|e| match *e {
+            Event::Moved { from, to, .. } => {
+                let hops = if from == YARD || to <= from {
+                    1
+                } else {
+                    (to - from) as u64
+                };
+                hops * HOP_MS + if to == HOME { POP_MS } else { 0 }
+            }
+            Event::Captured { .. } => FLY_MS,
+            Event::Rolled { .. } => ROLL_MS,
+            _ => 0,
+        })
+        .sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,5 +136,70 @@ mod tests {
         assert_eq!(TRACK[Player::Green.start_index()], (8, 1));
         assert_eq!(TRACK[Player::Yellow.start_index()], (13, 8));
         assert_eq!(TRACK[Player::Blue.start_index()], (6, 13));
+    }
+
+    #[test]
+    fn path_walks_one_cell_at_a_time() {
+        for player in Player::ALL {
+            for from in -1..HOME {
+                for to in from + 1..=HOME.min(from.max(0) + 6) {
+                    let steps = path(player, 0, from, to);
+                    assert_eq!(
+                        steps.len(),
+                        if from == YARD {
+                            1
+                        } else {
+                            (to - from) as usize
+                        }
+                    );
+                    assert_eq!(*steps.last().unwrap(), token_pos(player, 0, to));
+                    let mut prev = token_pos(player, 0, from);
+                    if from != YARD {
+                        for &(c, r) in &steps {
+                            let d = ((c - prev.0).powi(2) + (r - prev.1).powi(2)).sqrt();
+                            assert!(d <= 1.5, "{player:?} {from}->{to} jumps {d} to {c},{r}");
+                            prev = (c, r);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn captured_tokens_jump_back_to_the_yard() {
+        let steps = path(Player::Green, 2, 17, YARD);
+        assert_eq!(steps, vec![Player::Green.yard_spot(2)]);
+    }
+
+    #[test]
+    fn animation_time_adds_up() {
+        let moved = Event::Moved {
+            seat: 0,
+            token: 0,
+            from: 3,
+            to: 7,
+        };
+        assert_eq!(animation_ms(&[moved]), 4 * HOP_MS);
+        let home = Event::Moved {
+            seat: 0,
+            token: 0,
+            from: 54,
+            to: HOME,
+        };
+        assert_eq!(animation_ms(&[home]), 2 * HOP_MS + POP_MS);
+        let out = Event::Moved {
+            seat: 0,
+            token: 0,
+            from: YARD,
+            to: 0,
+        };
+        let cap = Event::Captured { seat: 1, token: 0 };
+        assert_eq!(
+            animation_ms(&[out, cap, Event::ExtraTurn { seat: 0 }]),
+            HOP_MS + FLY_MS
+        );
+        let rolled = Event::Rolled { seat: 0, value: 4 };
+        assert_eq!(animation_ms(&[rolled]), ROLL_MS);
     }
 }
