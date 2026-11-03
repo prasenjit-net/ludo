@@ -1,0 +1,46 @@
+name: Docker Hub description
+
+# Keeps the Docker Hub repository description in step with the repo: the overview
+# comes from docker/OVERVIEW.md and the short description from
+# docker/SHORT_DESCRIPTION.txt. Releases also do this; this workflow lets a text
+# change go live without a release.
+#
+# Needs the same secrets as the release: DOCKERHUB_USERNAME and DOCKERHUB_TOKEN,
+# where the token has Read, Write and Delete permission (editing the description requires it).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docker/OVERVIEW.md
+      - docker/SHORT_DESCRIPTION.txt
+      - .github/workflows/dockerhub-description.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dockerhub-description
+  cancel-in-progress: false
+
+jobs:
+  description:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: text
+        env:
+          # Computed here: job outputs containing a secret (the username) are dropped by GitHub.
+          IMAGE: ${{ vars.DOCKERHUB_IMAGE || format('{0}/ludo', secrets.DOCKERHUB_USERNAME) }}
+        run: |
+          sed "s|{{IMAGE}}|$IMAGE|g" docker/OVERVIEW.md > overview.md
+          echo "short=$(tr -d '\n' < docker/SHORT_DESCRIPTION.txt)" >> "$GITHUB_OUTPUT"
+          echo "repository=$IMAGE" >> "$GITHUB_OUTPUT"
+      - uses: peter-evans/dockerhub-description@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ steps.text.outputs.repository }}
+          short-description: ${{ steps.text.outputs.short }}
+          readme-filepath: overview.md

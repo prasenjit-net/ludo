@@ -1,0 +1,1 @@
+Ludo for 2-4 players: a Bevy/WebAssembly game with online rooms, in one small Rust server image.
