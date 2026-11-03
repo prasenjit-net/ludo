@@ -79,16 +79,40 @@ pub enum Phase {
 
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Event {
-    Rolled { seat: usize, value: u8 },
-    NoMoves { seat: usize },
-    TripleSix { seat: usize },
-    Moved { seat: usize, token: usize, from: i8, to: i8 },
+    Rolled {
+        seat: usize,
+        value: u8,
+    },
+    NoMoves {
+        seat: usize,
+    },
+    TripleSix {
+        seat: usize,
+    },
+    Moved {
+        seat: usize,
+        token: usize,
+        from: i8,
+        to: i8,
+    },
     /// `seat` is the victim.
-    Captured { seat: usize, token: usize },
-    Home { seat: usize, token: usize },
-    ExtraTurn { seat: usize },
-    Turn { seat: usize },
-    Won { seat: usize },
+    Captured {
+        seat: usize,
+        token: usize,
+    },
+    Home {
+        seat: usize,
+        token: usize,
+    },
+    ExtraTurn {
+        seat: usize,
+    },
+    Turn {
+        seat: usize,
+    },
+    Won {
+        seat: usize,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -203,7 +227,12 @@ impl Game {
             .ok_or(Error::IllegalMove)?;
         let from = self.tokens[seat][token];
         self.tokens[seat][token] = to;
-        let mut events = vec![Event::Moved { seat, token, from, to }];
+        let mut events = vec![Event::Moved {
+            seat,
+            token,
+            from,
+            to,
+        }];
 
         // A six, a capture or reaching home earns another roll.
         let mut bonus = dice == 6;
@@ -215,7 +244,10 @@ impl Game {
                 for t in 0..TOKENS {
                     if track_cell(self.seats[other], self.tokens[other][t]) == Some(cell) {
                         self.tokens[other][t] = YARD;
-                        events.push(Event::Captured { seat: other, token: t });
+                        events.push(Event::Captured {
+                            seat: other,
+                            token: t,
+                        });
                         bonus = true;
                     }
                 }

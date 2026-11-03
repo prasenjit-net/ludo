@@ -5,6 +5,7 @@ use crate::{HOME, LAST_TRACK, Player, YARD, track_cell};
 pub const GRID: i32 = 15;
 
 /// The 52 shared track cells, clockwise, starting at Red's start cell.
+#[rustfmt::skip]
 pub const TRACK: [(i32, i32); 52] = [
     (1, 6), (2, 6), (3, 6), (4, 6), (5, 6),
     (6, 5), (6, 4), (6, 3), (6, 2), (6, 1), (6, 0),

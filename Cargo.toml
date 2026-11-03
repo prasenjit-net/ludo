@@ -17,6 +17,7 @@ ludo-core = { path = "ludo-core" }
 opt-level = 2
 
 [profile.release]
-opt-level = "s"
-lto = "thin"
+opt-level = "z"
+lto = "fat"
 codegen-units = 1
+panic = "abort"

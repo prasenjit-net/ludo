@@ -2,7 +2,7 @@
 
 use crate::{
     board::{CELL, cell_pos, player_color},
-    bridge, net,
+    net,
     session::Session,
 };
 use bevy::{prelude::*, window::PrimaryWindow};
@@ -17,7 +17,7 @@ impl Plugin for PlayPlugin {
             .add_systems(Startup, setup_assets)
             .add_systems(
                 Update,
-                (pump, sync_tokens, handle_clicks, animate_tokens, push_ui).chain(),
+                (pump, sync_tokens, handle_clicks, animate_tokens).chain(),
             );
     }
 }
@@ -60,11 +60,8 @@ fn setup_assets(
     });
 }
 
-/// Handle commands from the HTML layer and messages from the server.
+/// Feed server messages into the session (only marks it changed when there are some).
 fn pump(mut session: ResMut<Session>) {
-    for cmd in bridge::drain() {
-        session.handle_cmd(cmd);
-    }
     for ev in net::poll() {
         session.handle_net(ev);
     }
@@ -180,7 +177,11 @@ fn animate_tokens(
             .is_some_and(|(seat, idxs)| *seat == token.seat && idxs.contains(&token.idx));
         for child in children {
             if let Ok((mut vis, mut ring_tf)) = rings.get_mut(*child) {
-                *vis = if active { Visibility::Inherited } else { Visibility::Hidden };
+                *vis = if active {
+                    Visibility::Inherited
+                } else {
+                    Visibility::Hidden
+                };
                 ring_tf.scale = Vec3::splat(pulse);
             }
         }
@@ -201,9 +202,15 @@ fn handle_clicks(
         touches.iter_just_pressed().next().map(|t| t.position())
     };
     let Some(screen_pos) = screen_pos else { return };
-    let Some((seat, movable)) = session.clickable() else { return };
-    let Ok((camera, cam_tf)) = cameras.single() else { return };
-    let Ok(world) = camera.viewport_to_world_2d(cam_tf, screen_pos) else { return };
+    let Some((seat, movable)) = session.clickable() else {
+        return;
+    };
+    let Ok((camera, cam_tf)) = cameras.single() else {
+        return;
+    };
+    let Ok(world) = camera.viewport_to_world_2d(cam_tf, screen_pos) else {
+        return;
+    };
 
     let hit = tokens
         .iter()
@@ -214,8 +221,4 @@ fn handle_clicks(
     if let Some((idx, _)) = hit {
         session.play(idx);
     }
-}
-
-fn push_ui(mut session: ResMut<Session>) {
-    session.push_ui_if_dirty();
 }

@@ -7,15 +7,20 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMsg {
     /// Open a new room for `players` (2..=4) and take the first seat.
-    Create { name: String, players: u8 },
-    Join { code: String, name: String },
+    Create {
+        players: u8,
+    },
+    Join {
+        code: String,
+    },
     Roll,
-    Play { token: usize },
+    Play {
+        token: usize,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LobbyPlayer {
-    pub name: String,
     pub player: Player,
     pub connected: bool,
 }
@@ -38,5 +43,7 @@ pub enum ServerMsg {
         game: Game,
         events: Vec<Event>,
     },
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }

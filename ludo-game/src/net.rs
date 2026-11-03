@@ -54,7 +54,12 @@ pub fn connect(first: &ClientMsg) -> Result<(), String> {
     ws.set_onopen(Some(on_open.as_ref().unchecked_ref()));
     ws.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
     ws.set_onclose(Some(on_close.as_ref().unchecked_ref()));
-    CONN.with(|c| *c.borrow_mut() = Some(Conn { ws, _closures: (on_open, on_message, on_close) }));
+    CONN.with(|c| {
+        *c.borrow_mut() = Some(Conn {
+            ws,
+            _closures: (on_open, on_message, on_close),
+        })
+    });
     Ok(())
 }
 

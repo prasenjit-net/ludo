@@ -1,2 +1,3 @@
 target/
 ludo-game/dist/
+.DS_Store

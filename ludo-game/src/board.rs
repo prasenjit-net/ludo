@@ -1,9 +1,14 @@
 //! The static Ludo board, drawn from the geometry in `ludo-core`.
 
 use bevy::prelude::*;
-use ludo_core::{Player, board::{GRID, TRACK}};
+use ludo_core::{
+    Player,
+    board::{GRID, TRACK},
+};
 
 pub const CELL: f32 = 40.0;
+/// World size of the board square plus a small margin.
+pub const EXTENT: f32 = GRID as f32 * CELL + 40.0;
 const GAP: f32 = 2.0;
 
 pub struct BoardPlugin;
@@ -24,17 +29,8 @@ pub fn player_color(player: Player) -> Color {
 }
 
 fn setup_camera(mut commands: Commands) {
-    commands.spawn((
-        Camera2d,
-        // Scale to fit the whole board with a small margin, at any window size.
-        Projection::Orthographic(OrthographicProjection {
-            scaling_mode: bevy::camera::ScalingMode::AutoMin {
-                min_width: GRID as f32 * CELL + 40.0,
-                min_height: GRID as f32 * CELL + 40.0,
-            },
-            ..OrthographicProjection::default_2d()
-        }),
-    ));
+    // Framing is driven by `ui::fit_board`, which fits the board into its layout area.
+    commands.spawn(Camera2d);
 }
 
 /// World position of the centre of a grid cell (row 0 is the top).
@@ -56,14 +52,24 @@ fn spawn_board(mut commands: Commands) {
     let star = Color::srgb(0.80, 0.78, 0.72);
 
     commands.spawn((
-        Sprite::from_color(Color::srgb(0.2, 0.2, 0.24), Vec2::splat(GRID as f32 * CELL + 16.0)),
+        Sprite::from_color(
+            Color::srgb(0.2, 0.2, 0.24),
+            Vec2::splat(GRID as f32 * CELL + 16.0),
+        ),
         Transform::from_xyz(0.0, 0.0, -1.0),
     ));
 
     // Shared track; start cells and star cells (safe squares) get a tint below.
     for (i, &(col, row)) in TRACK.iter().enumerate() {
         let safe = i % 13 == 8;
-        tile(&mut commands, col as f32, row as f32, 1.0, 0.0, if safe { star } else { white });
+        tile(
+            &mut commands,
+            col as f32,
+            row as f32,
+            1.0,
+            0.0,
+            if safe { star } else { white },
+        );
     }
 
     for player in Player::ALL {
@@ -75,7 +81,14 @@ fn spawn_board(mut commands: Commands) {
         tile(&mut commands, c, r, 6.0, 0.0, color);
         tile(&mut commands, c, r, 4.0, 0.1, white);
         for (dc, dr) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
-            tile(&mut commands, c + dc, r + dr, 1.0, 0.2, color.with_alpha(0.45));
+            tile(
+                &mut commands,
+                c + dc,
+                r + dr,
+                1.0,
+                0.2,
+                color.with_alpha(0.45),
+            );
         }
 
         let (sc, sr) = TRACK[player.start_index()];

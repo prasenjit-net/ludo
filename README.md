@@ -1,13 +1,13 @@
 # Ludo
 
-A 2D Ludo game built with [Bevy](https://bevy.org) (0.20), compiled to WebAssembly and served by a small Rust web server. Play 2 to 4 players on the same screen, or online in a room with friends.
+A 2D Ludo game built with [Bevy](https://bevy.org) (0.20), compiled to WebAssembly and served by a small Rust web server. Play 2 to 4 players on the same screen, or online in a room with friends. Designed phone-first: portrait layout with big touch targets, and a side-by-side layout in landscape.
 
 ## Layout
 
 | Crate | Description |
 |---|---|
 | [`ludo-core/`](ludo-core/) | Rules engine and the client/server protocol. Pure Rust, no I/O, unit tested. Shared by the other two crates. |
-| [`ludo-game/`](ludo-game/) | The game: a Bevy app compiled to `wasm32-unknown-unknown` and bundled with [Trunk](https://trunkrs.dev). Bevy draws the board and tokens; the menu, lobby and HUD are plain HTML in `index.html`, bridged through `src/bridge.rs`. |
+| [`ludo-game/`](ludo-game/) | The game: a Bevy app compiled to `wasm32-unknown-unknown` and bundled with [Trunk](https://trunkrs.dev). Everything on screen is Bevy: the board and tokens (`board.rs`, `play.rs`) and all menus and the HUD (`ui.rs`, built with `bevy_ui`, sized in `vmin` so it scales with the screen). `index.html` is just a viewport and a stylesheet. |
 | [`server/`](server/) | An axum server that embeds the game build (`ludo-game/dist`) and hosts online rooms over a WebSocket at `/ws`. |
 
 ## Prerequisites
@@ -32,13 +32,11 @@ make run      # build the game, then serve it at http://127.0.0.1:3000
 
 The game is embedded at compile time, so the server must be rebuilt after the game changes. `make run` does this for you.
 
-`http://127.0.0.1:3000/#local2` (or `#local3`, `#local4`) starts a same-screen game directly.
-
 ## How to play
 
 - **Same screen:** pick 2, 3 or 4 players and take turns on one screen.
-- **Online:** one player creates a room and shares the 4-letter code; the others join with it. The game starts when the room is full. The server rolls the dice and validates every move, so clients cannot cheat. If a player disconnects, the server plays their turns so the game keeps going.
-- Press **Roll dice** (or Space), then click one of the highlighted tokens.
+- **Online:** one player hosts a room for 2 to 4 players and shares the 4-digit code; the others tap **Join a room** and type it on the on-screen keypad. The game starts when the room is full. The server rolls the dice and validates every move, so clients cannot cheat. If a player disconnects, the server plays their turns so the game keeps going.
+- Tap **ROLL**, then tap one of the highlighted tokens.
 
 ## Rules implemented
 
@@ -52,5 +50,6 @@ The game is embedded at compile time, so the server must be rebuilt after the ga
 ## Known limitations
 
 - No reconnecting to a game in progress: a player who drops is replaced by auto-play.
-- The wasm file is large (about 27 MB). Trunk's `wasm-opt` step failed, so it is disabled (`data-wasm-opt="0"` in `ludo-game/index.html`).
+- The wasm bundle is about 15 MB (5.6 MB gzipped; the server gzips responses). Release builds use fat LTO and `opt-level = "z"` to keep it small, so they take a few minutes.
+- Touch and layout were tested in headless Chrome with device emulation, not on a physical phone.
 - Rooms live in server memory and are lost on restart.

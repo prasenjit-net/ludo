@@ -17,6 +17,7 @@ use rooms::Rooms;
 use rust_embed::RustEmbed;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc;
+use tower_http::compression::CompressionLayer;
 
 /// The trunk build output of the `ludo-game` crate, baked into the binary.
 #[derive(RustEmbed)]
@@ -31,8 +32,11 @@ async fn main() {
     let app = Router::new()
         .route("/ws", get(ws_upgrade))
         .fallback(get(serve_static))
+        .layer(CompressionLayer::new())
         .with_state(Rooms::default());
-    let listener = tokio::net::TcpListener::bind(&addr).await.expect("bind address");
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .expect("bind address");
     println!("Ludo server listening on http://{addr}");
     axum::serve(listener, app).await.expect("server error");
 }
@@ -66,11 +70,11 @@ async fn connection(socket: WebSocket, rooms: Rooms) {
             continue;
         };
         match (msg, &room) {
-            (ClientMsg::Create { name, players }, None) => {
-                room = rooms.create(conn, tx.clone(), &name, players);
+            (ClientMsg::Create { players }, None) => {
+                room = rooms.create(conn, tx.clone(), players);
             }
-            (ClientMsg::Join { code, name }, None) => {
-                room = rooms.join(conn, tx.clone(), &code, &name);
+            (ClientMsg::Join { code }, None) => {
+                room = rooms.join(conn, tx.clone(), &code);
             }
             (ClientMsg::Roll, Some(code)) => {
                 let value = rand::Rng::random_range(&mut rand::rng(), 1..=6);

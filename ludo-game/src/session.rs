@@ -4,63 +4,55 @@
 //! engine. In online play the server owns the game and we only mirror its
 //! snapshots and send requests.
 
-use crate::{bridge::{self, Cmd}, net::{self, NetEvent}};
+use crate::net::{self, NetEvent};
 use bevy::prelude::Resource;
 use ludo_core::{
     Event, Game, Phase, Player,
     protocol::{ClientMsg, LobbyPlayer, ServerMsg},
 };
-use serde::Serialize;
 
-#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+pub const CODE_LEN: usize = 4;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Screen {
     Menu,
+    Join,
     Lobby,
     Game,
+}
+
+/// Everything the user can ask for from the UI.
+#[derive(Clone, Copy, Debug)]
+pub enum Action {
+    /// Start a same-screen game with this many players.
+    Local(u8),
+    /// Open an online room for this many players.
+    Create(u8),
+    OpenJoin,
+    Digit(u8),
+    Backspace,
+    Join,
+    Roll,
+    Menu,
 }
 
 #[derive(Resource)]
 pub struct Session {
     pub screen: Screen,
-    online: bool,
+    pub online: bool,
     pub game: Option<Game>,
-    players: Vec<LobbyPlayer>,
-    capacity: usize,
-    you: Option<usize>,
-    room: Option<String>,
-    log: Vec<String>,
-    last_roll: Option<(usize, u8)>,
-    error: Option<String>,
+    pub players: Vec<LobbyPlayer>,
+    pub capacity: usize,
+    pub you: Option<usize>,
+    pub room: Option<String>,
+    pub join_code: String,
+    pub last_roll: Option<u8>,
+    pub last_event: Option<String>,
+    pub error: Option<String>,
     /// Bumped when a new game starts (token entities are rebuilt).
     pub generation: u32,
     /// Bumped whenever the game state changes (tokens are re-targeted).
     pub rev: u32,
-    ui_dirty: bool,
-}
-
-#[derive(Serialize)]
-struct UiPlayer<'a> {
-    name: &'a str,
-    color: &'static str,
-    connected: bool,
-}
-
-#[derive(Serialize)]
-struct UiState<'a> {
-    screen: Screen,
-    online: bool,
-    room: &'a Option<String>,
-    capacity: usize,
-    players: Vec<UiPlayer<'a>>,
-    you: Option<usize>,
-    turn: Option<usize>,
-    dice: Option<u8>,
-    can_roll: bool,
-    winner: Option<usize>,
-    status: String,
-    log: &'a [String],
-    error: &'a Option<String>,
 }
 
 impl Session {
@@ -73,78 +65,129 @@ impl Session {
             capacity: 0,
             you: None,
             room: None,
-            log: Vec::new(),
+            join_code: String::new(),
             last_roll: None,
+            last_event: None,
             error: None,
             generation: 0,
             rev: 0,
-            ui_dirty: true,
         }
     }
 
     /// Can the local user act on the current game state?
     pub fn can_act(&self) -> bool {
-        match &self.game {
-            Some(g) => g.phase() != Phase::Over && (!self.online || self.you == Some(g.turn)),
-            None => false,
-        }
+        self.game
+            .as_ref()
+            .is_some_and(|g| g.phase() != Phase::Over && (!self.online || self.you == Some(g.turn)))
     }
 
     pub fn can_roll(&self) -> bool {
         self.can_act() && self.game.as_ref().is_some_and(|g| g.phase() == Phase::Roll)
     }
 
-    /// Tokens the local user may click right now: `(seat, token)`.
+    /// Tokens the local user may tap right now: `(seat, tokens)`.
     pub fn clickable(&self) -> Option<(usize, Vec<usize>)> {
         let g = self.game.as_ref()?;
         (self.can_act() && g.phase() == Phase::Move).then(|| (g.turn, g.movable()))
     }
 
-    fn reset(&mut self) {
-        net::close();
-        *self = Session { generation: self.generation + 1, rev: self.rev + 1, ..Session::new() };
+    /// The die to show: the pending roll, else the last one rolled.
+    pub fn die(&self) -> Option<u8> {
+        self.game.as_ref().and_then(|g| g.dice).or(self.last_roll)
     }
 
-    fn start_game(&mut self, game: Game) {
-        self.game = Some(game);
-        self.screen = Screen::Game;
-        self.log.clear();
-        self.last_roll = None;
-        self.generation += 1;
-        self.rev += 1;
-        self.ui_dirty = true;
+    pub fn winner(&self) -> Option<usize> {
+        self.game.as_ref().and_then(|g| g.winner)
     }
 
-    // ---- commands from the HTML layer -------------------------------------
+    pub fn name(&self, seat: usize) -> &'static str {
+        self.players.get(seat).map_or("?", |p| p.player.name())
+    }
 
-    pub fn handle_cmd(&mut self, cmd: Cmd) {
-        match cmd {
-            Cmd::Local { players } => {
-                self.reset();
-                let n = players.clamp(2, 4) as usize;
-                let seats = Player::for_count(n);
-                self.players = seats
-                    .iter()
-                    .map(|&p| LobbyPlayer { name: p.name().into(), player: p, connected: true })
-                    .collect();
-                self.start_game(Game::new(seats));
-            }
-            Cmd::Create { name, players } => self.go_online(ClientMsg::Create { name, players }),
-            Cmd::Join { name, code } => self.go_online(ClientMsg::Join { name, code }),
-            Cmd::Roll => self.roll(),
-            Cmd::Menu => self.reset(),
+    pub fn status(&self) -> String {
+        let Some(g) = &self.game else {
+            return String::new();
+        };
+        let mine = !self.online || self.you == Some(g.turn);
+        let who = self.name(g.turn);
+        match (g.phase(), mine, self.online) {
+            (Phase::Over, ..) => format!("{} wins!", self.name(g.winner.unwrap_or(0))),
+            (Phase::Roll, true, true) => "Your turn: roll the dice".into(),
+            (Phase::Move, true, true) => "Your turn: tap a token".into(),
+            (Phase::Roll, true, false) => format!("{who}: roll the dice"),
+            (Phase::Move, true, false) => format!("{who}: tap a token"),
+            (_, false, _) => format!("Waiting for {who}..."),
         }
     }
 
+    // ---- actions -----------------------------------------------------------
+
+    pub fn apply(&mut self, action: Action) {
+        match action {
+            Action::Local(n) => {
+                self.reset();
+                let seats = Player::for_count(n as usize);
+                self.players = seats
+                    .iter()
+                    .map(|&p| LobbyPlayer {
+                        player: p,
+                        connected: true,
+                    })
+                    .collect();
+                self.start_game(Game::new(seats));
+            }
+            Action::Create(players) => self.go_online(ClientMsg::Create { players }),
+            Action::OpenJoin => {
+                self.reset();
+                self.screen = Screen::Join;
+            }
+            Action::Digit(d) => {
+                if self.join_code.len() < CODE_LEN {
+                    self.join_code.push(char::from(b'0' + d));
+                }
+            }
+            Action::Backspace => {
+                self.join_code.pop();
+            }
+            Action::Join => {
+                if self.join_code.len() == CODE_LEN {
+                    let code = self.join_code.clone();
+                    self.go_online(ClientMsg::Join { code });
+                    self.screen = Screen::Join;
+                }
+            }
+            Action::Roll => self.roll(),
+            Action::Menu => self.reset(),
+        }
+    }
+
+    fn reset(&mut self) {
+        net::close();
+        *self = Session {
+            generation: self.generation + 1,
+            rev: self.rev + 1,
+            ..Session::new()
+        };
+    }
+
     fn go_online(&mut self, first: ClientMsg) {
+        let code = std::mem::take(&mut self.join_code);
         self.reset();
+        self.join_code = code;
         match net::connect(&first) {
             Ok(()) => self.online = true,
             Err(e) => self.error = Some(e),
         }
     }
 
-    // ---- player actions ----------------------------------------------------
+    fn start_game(&mut self, game: Game) {
+        self.game = Some(game);
+        self.screen = Screen::Game;
+        self.last_event = None;
+        self.last_roll = None;
+        self.generation += 1;
+        self.rev += 1;
+    }
 
     pub fn roll(&mut self) {
         if !self.can_roll() {
@@ -153,9 +196,9 @@ impl Session {
         if self.online {
             net::send(&ClientMsg::Roll);
         } else if let Some(game) = &mut self.game
-            && let Ok(events) = game.roll(bridge::random_die())
+            && let Ok(events) = game.roll(random_die())
         {
-            self.apply(events);
+            self.apply_events(events);
         }
     }
 
@@ -168,16 +211,20 @@ impl Session {
         } else if let Some(game) = &mut self.game
             && let Ok(events) = game.play(token)
         {
-            self.apply(events);
+            self.apply_events(events);
         }
     }
 
     // ---- server messages ---------------------------------------------------
 
     pub fn handle_net(&mut self, ev: NetEvent) {
-        self.ui_dirty = true;
         match ev {
-            NetEvent::Msg(ServerMsg::Lobby { code, you, capacity, players }) => {
+            NetEvent::Msg(ServerMsg::Lobby {
+                code,
+                you,
+                capacity,
+                players,
+            }) => {
                 self.screen = Screen::Lobby;
                 self.room = Some(code);
                 self.you = Some(you);
@@ -185,7 +232,13 @@ impl Session {
                 self.players = players;
                 self.error = None;
             }
-            NetEvent::Msg(ServerMsg::State { code, you, players, game, events }) => {
+            NetEvent::Msg(ServerMsg::State {
+                code,
+                you,
+                players,
+                game,
+                events,
+            }) => {
                 self.room = Some(code);
                 self.you = Some(you);
                 self.players = players;
@@ -195,7 +248,7 @@ impl Session {
                 } else {
                     self.game = Some(game);
                 }
-                self.apply(events);
+                self.apply_events(events);
             }
             NetEvent::Msg(ServerMsg::Error { message }) => {
                 self.error = Some(message);
@@ -205,32 +258,24 @@ impl Session {
                 }
             }
             NetEvent::Closed => {
-                if self.screen != Screen::Menu || self.online {
-                    let msg = "Disconnected from the server".to_string();
+                if self.online {
                     self.reset();
-                    self.error = Some(msg);
+                    self.error = Some("Disconnected from the server".into());
                 }
             }
         }
     }
 
-    fn apply(&mut self, events: Vec<Event>) {
+    fn apply_events(&mut self, events: Vec<Event>) {
         for e in &events {
-            if let Event::Rolled { seat, value } = e {
-                self.last_roll = Some((*seat, *value));
+            if let Event::Rolled { value, .. } = e {
+                self.last_roll = Some(*value);
             }
             if let Some(line) = self.describe(e) {
-                self.log.push(line);
+                self.last_event = Some(line);
             }
         }
-        let excess = self.log.len().saturating_sub(40);
-        self.log.drain(..excess);
         self.rev += 1;
-        self.ui_dirty = true;
-    }
-
-    fn name(&self, seat: usize) -> String {
-        self.players.get(seat).map_or_else(|| "?".into(), |p| p.name.clone())
     }
 
     fn describe(&self, e: &Event) -> Option<String> {
@@ -245,53 +290,8 @@ impl Session {
             Event::Moved { .. } | Event::Turn { .. } => return None,
         })
     }
+}
 
-    // ---- UI state ----------------------------------------------------------
-
-    fn status(&self) -> String {
-        let Some(g) = &self.game else { return String::new() };
-        let who = self.name(g.turn);
-        let mine = !self.online || self.you == Some(g.turn);
-        match (g.phase(), mine) {
-            (Phase::Over, _) => format!("{} wins!", self.name(g.winner.unwrap_or(0))),
-            (Phase::Roll, true) if self.online => "Your turn: roll the dice".into(),
-            (Phase::Move, true) if self.online => "Your turn: pick a token".into(),
-            (Phase::Roll, true) => format!("{who}: roll the dice"),
-            (Phase::Move, true) => format!("{who}: pick a token to move"),
-            (_, false) => format!("Waiting for {who}…"),
-        }
-    }
-
-    pub fn push_ui_if_dirty(&mut self) {
-        if !std::mem::take(&mut self.ui_dirty) {
-            return;
-        }
-        let dice = self
-            .game
-            .as_ref()
-            .and_then(|g| g.dice)
-            .or(self.last_roll.map(|(_, v)| v));
-        let state = UiState {
-            screen: self.screen,
-            online: self.online,
-            room: &self.room,
-            capacity: self.capacity,
-            players: self
-                .players
-                .iter()
-                .map(|p| UiPlayer { name: &p.name, color: p.player.name(), connected: p.connected })
-                .collect(),
-            you: self.you,
-            turn: self.game.as_ref().map(|g| g.turn),
-            dice,
-            can_roll: self.can_roll(),
-            winner: self.game.as_ref().and_then(|g| g.winner),
-            status: self.status(),
-            log: &self.log,
-            error: &self.error,
-        };
-        if let Ok(json) = serde_json::to_string(&state) {
-            bridge::render(&json);
-        }
-    }
+fn random_die() -> u8 {
+    (js_sys::Math::random() * 6.0) as u8 % 6 + 1
 }

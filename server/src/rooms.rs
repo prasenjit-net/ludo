@@ -15,7 +15,6 @@ pub type Tx = UnboundedSender<ServerMsg>;
 
 struct Member {
     conn: u64,
-    name: String,
     tx: Tx,
     connected: bool,
 }
@@ -37,7 +36,6 @@ impl Room {
             .iter()
             .enumerate()
             .map(|(i, m)| LobbyPlayer {
-                name: m.name.clone(),
                 player: colors[i],
                 connected: m.connected,
             })
@@ -73,7 +71,9 @@ impl Room {
     /// Play the turns of disconnected players so the game never stalls.
     fn autoplay(&mut self) -> Vec<Event> {
         let mut events = Vec::new();
-        let Some(game) = &mut self.game else { return events };
+        let Some(game) = &mut self.game else {
+            return events;
+        };
         let mut rng = rand::rng();
         while game.phase() != Phase::Over && !self.members[game.turn].connected {
             events.extend(game.roll(rng.random_range(1..=6)).unwrap_or_default());
@@ -91,18 +91,17 @@ pub struct Rooms {
 }
 
 fn error(tx: &Tx, message: impl Into<String>) {
-    let _ = tx.send(ServerMsg::Error { message: message.into() });
-}
-
-fn clean_name(name: &str, fallback: usize) -> String {
-    let name: String = name.trim().chars().take(16).collect();
-    if name.is_empty() { format!("Player {fallback}") } else { name }
+    let _ = tx.send(ServerMsg::Error {
+        message: message.into(),
+    });
 }
 
 fn new_code(rooms: &HashMap<String, Room>) -> String {
     let mut rng = rand::rng();
     loop {
-        let code: String = (0..4).map(|_| rng.random_range(b'A'..=b'Z') as char).collect();
+        let code: String = (0..4)
+            .map(|_| rng.random_range(b'0'..=b'9') as char)
+            .collect();
         if !rooms.contains_key(&code) {
             return code;
         }
@@ -110,7 +109,7 @@ fn new_code(rooms: &HashMap<String, Room>) -> String {
 }
 
 impl Rooms {
-    pub fn create(&self, conn: u64, tx: Tx, name: &str, players: u8) -> Option<String> {
+    pub fn create(&self, conn: u64, tx: Tx, players: u8) -> Option<String> {
         if !(2..=4).contains(&players) {
             error(&tx, "a game needs 2 to 4 players");
             return None;
@@ -119,7 +118,11 @@ impl Rooms {
         let code = new_code(&rooms);
         let room = Room {
             capacity: players as usize,
-            members: vec![Member { conn, name: clean_name(name, 1), tx, connected: true }],
+            members: vec![Member {
+                conn,
+                tx,
+                connected: true,
+            }],
             game: None,
         };
         room.broadcast_lobby(&code);
@@ -127,8 +130,8 @@ impl Rooms {
         Some(code)
     }
 
-    pub fn join(&self, conn: u64, tx: Tx, code: &str, name: &str) -> Option<String> {
-        let code = code.trim().to_uppercase();
+    pub fn join(&self, conn: u64, tx: Tx, code: &str) -> Option<String> {
+        let code = code.trim().to_string();
         let mut rooms = self.inner.lock().unwrap();
         let Some(room) = rooms.get_mut(&code) else {
             error(&tx, format!("room {code} does not exist"));
@@ -138,8 +141,11 @@ impl Rooms {
             error(&tx, format!("room {code} is full"));
             return None;
         }
-        let seat = room.members.len() + 1;
-        room.members.push(Member { conn, name: clean_name(name, seat), tx, connected: true });
+        room.members.push(Member {
+            conn,
+            tx,
+            connected: true,
+        });
         if room.members.len() == room.capacity {
             room.game = Some(Game::new(Player::for_count(room.capacity)));
             room.broadcast_state(&code, Vec::new());
@@ -150,9 +156,17 @@ impl Rooms {
     }
 
     /// Run a game action for `conn`, checking it is that player's turn.
-    pub fn act(&self, code: &str, conn: u64, tx: &Tx, action: impl FnOnce(&mut Game) -> Result<Vec<Event>, ludo_core::Error>) {
+    pub fn act(
+        &self,
+        code: &str,
+        conn: u64,
+        tx: &Tx,
+        action: impl FnOnce(&mut Game) -> Result<Vec<Event>, ludo_core::Error>,
+    ) {
         let mut rooms = self.inner.lock().unwrap();
-        let Some(room) = rooms.get_mut(code) else { return };
+        let Some(room) = rooms.get_mut(code) else {
+            return;
+        };
         let (Some(seat), Some(game)) = (room.seat_of(conn), room.game.as_mut()) else {
             return error(tx, "the game has not started");
         };
@@ -170,7 +184,9 @@ impl Rooms {
 
     pub fn disconnect(&self, code: &str, conn: u64) {
         let mut rooms = self.inner.lock().unwrap();
-        let Some(room) = rooms.get_mut(code) else { return };
+        let Some(room) = rooms.get_mut(code) else {
+            return;
+        };
         if room.game.is_none() {
             room.members.retain(|m| m.conn != conn);
             if room.members.is_empty() {
