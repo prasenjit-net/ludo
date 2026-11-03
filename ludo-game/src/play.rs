@@ -2,6 +2,7 @@
 
 use crate::{
     board::{CELL, cell_pos, player_color},
+    fx::{self, FxAssets},
     net, paint,
     session::Session,
 };
@@ -83,6 +84,8 @@ impl Step {
 struct Active {
     step: Step,
     from: Vec2,
+    /// The step has begun (its wait is over) and its effect has gone off.
+    started: bool,
     /// Seconds since the step began; negative while waiting.
     t: f32,
 }
@@ -386,6 +389,8 @@ fn smooth(u: f32) -> f32 {
 
 fn animate_tokens(
     time: Res<Time>,
+    mut commands: Commands,
+    fx: Res<FxAssets>,
     mut session: ResMut<Session>,
     mut tokens: Query<(&Token, &Target, &mut Motion, &mut Transform, &Children)>,
     mut rings: Query<
@@ -418,7 +423,11 @@ fn animate_tokens(
 ) {
     let backlog: usize = tokens.iter().map(|(_, _, m, ..)| m.queue.len()).sum();
     let speed = 1.0 + backlog.saturating_sub(BACKLOG) as f32 / BACKLOG as f32;
-    let dt = time.delta_secs() * speed;
+    let reduced = session.settings.reduced_motion;
+    let calm = if reduced { 2.5 } else { 1.0 };
+    let dt = time.delta_secs() * speed * calm;
+    let effects = fx::enabled(&session);
+    let mut bursts = Vec::new();
     let ease = 1.0 - (-14.0 * time.delta_secs()).exp();
     let pulse = 1.0 + 0.12 * (time.elapsed_secs() * 6.0).sin();
     let clickable = session.clickable();
@@ -432,6 +441,7 @@ fn animate_tokens(
             motion.active = Some(Active {
                 step,
                 from,
+                started: false,
                 t: -step.wait,
             });
         }
@@ -442,6 +452,15 @@ fn animate_tokens(
         if let Some(active) = &mut motion.active {
             busy = true;
             active.t += dt;
+            if active.t >= 0.0 && !active.started {
+                active.started = true;
+                let at = active.from + Vec2::Y * (GROUND_Y + CELL * 0.1);
+                match active.step.kind {
+                    Kind::Fly => bursts.push((at, token.seat, fx::Burst::Capture)),
+                    Kind::Pop => bursts.push((at, token.seat, fx::Burst::Home)),
+                    Kind::Hop => {}
+                }
+            }
             let secs = active.step.secs();
             if active.t >= secs {
                 pos = active.step.to;
@@ -482,6 +501,10 @@ fn animate_tokens(
         }
         busy |= !motion.queue.is_empty();
 
+        if reduced {
+            lift = 0.0;
+            scale = Vec3::ONE;
+        }
         // Tokens lower on the screen are in front; a jumping one is in front of all.
         let z = if flying { 6.0 } else { 5.0 - pos.y * 0.0005 };
         tf.translation = Vec3::new(pos.x, pos.y + lift, z);
@@ -501,7 +524,7 @@ fn animate_tokens(
             }
             if let Ok(mut pawn_tf) = pawns.get_mut(*child) {
                 // A movable pawn bobs to catch the eye.
-                let bob = if active {
+                let bob = if active && !reduced {
                     (time.elapsed_secs() * 8.0).sin().abs() * CELL * 0.06
                 } else {
                     0.0
@@ -514,6 +537,17 @@ fn animate_tokens(
                 shadow_tf.translation.y = GROUND_Y - lift;
                 shadow_tf.scale = SHADOW_SCALE * Vec3::new(shrink, shrink, 1.0);
             }
+        }
+    }
+
+    for (at, seat, kind) in bursts {
+        let Some(game) = &session.game else { continue };
+        let color = player_color(game.seats[seat]);
+        if matches!(kind, fx::Burst::Capture) && (!session.in_room || session.you == Some(seat)) {
+            fx::vibrate(&session, 40);
+        }
+        if effects {
+            fx::burst(&mut commands, &fx, at, color, kind);
         }
     }
 

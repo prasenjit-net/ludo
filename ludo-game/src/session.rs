@@ -7,7 +7,7 @@
 
 use crate::{
     net::{self, NetEvent},
-    store::{self, Profile},
+    store::{self, Profile, Settings},
 };
 use bevy::prelude::Resource;
 use ludo_core::{
@@ -48,6 +48,8 @@ pub enum Action {
     /// Start a same-screen game with this many players.
     Local(u8),
     Roll,
+    ToggleEffects,
+    ToggleReducedMotion,
     /// Leave the room or game and go back to the room list.
     Leave,
     Retry,
@@ -66,6 +68,7 @@ pub struct Session {
     pub screen: Screen,
     pub profile: Profile,
     pub has_profile: bool,
+    pub settings: Settings,
     /// Text being edited on the profile / create screens (kept in sync by `ui`).
     pub name_draft: String,
     pub room_draft: String,
@@ -127,6 +130,7 @@ impl Session {
             color_draft: profile.color,
             profile,
             has_profile,
+            settings: store::load_settings(),
             room_draft: String::new(),
             create_players: 4,
             connected: false,
@@ -277,6 +281,14 @@ impl Session {
                 self.start_game(Game::new(seats));
             }
             Action::Roll => self.roll(),
+            Action::ToggleEffects => {
+                self.settings.effects = !self.settings.effects;
+                store::save_settings(&self.settings);
+            }
+            Action::ToggleReducedMotion => {
+                self.settings.reduced_motion = !self.settings.reduced_motion;
+                store::save_settings(&self.settings);
+            }
             Action::Leave => {
                 if self.in_room {
                     net::send(&ClientMsg::LeaveRoom);

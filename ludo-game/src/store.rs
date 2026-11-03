@@ -13,6 +13,50 @@ pub struct Profile {
     pub client_id: String,
 }
 
+const SETTINGS_KEY: &str = "ludo.settings";
+
+/// Display preferences, kept in local storage.
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    /// Particles, confetti and the turn banner.
+    pub effects: bool,
+    /// Skip jumps, tumbling and bobbing, and play moves faster.
+    pub reduced_motion: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            effects: true,
+            reduced_motion: false,
+        }
+    }
+}
+
+/// Saved settings; a first visit follows the system's reduced-motion preference.
+pub fn load_settings() -> Settings {
+    let saved = storage()
+        .and_then(|s| s.get_item(SETTINGS_KEY).ok()?)
+        .and_then(|json| serde_json::from_str(&json).ok());
+    saved.unwrap_or_else(|| Settings {
+        reduced_motion: prefers_reduced_motion(),
+        ..Settings::default()
+    })
+}
+
+pub fn save_settings(settings: &Settings) {
+    if let (Some(storage), Ok(json)) = (storage(), serde_json::to_string(settings)) {
+        let _ = storage.set_item(SETTINGS_KEY, &json);
+    }
+}
+
+fn prefers_reduced_motion() -> bool {
+    web_sys::window()
+        .and_then(|w| w.match_media("(prefers-reduced-motion: reduce)").ok()?)
+        .is_some_and(|m| m.matches())
+}
+
 fn storage() -> Option<web_sys::Storage> {
     web_sys::window()?.local_storage().ok()?
 }

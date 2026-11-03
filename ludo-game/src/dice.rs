@@ -125,6 +125,7 @@ fn animate_die(
 ) {
     let dt = time.delta_secs();
     let state = &mut *state;
+    let reduced = session.settings.reduced_motion;
 
     // A new roll has been seen: settle the running tumble, or tumble for it now.
     let rolled = session.roll_count != state.seen_rolls;
@@ -161,10 +162,12 @@ fn animate_die(
                 // A different face each time.
                 face = (face.max(1) - 1 + random_die() % 5 + 1) % 6 + 1;
             }
-            let spin = *t * TAU * 2.0;
-            transform.rotation = Rot2::radians(spin);
-            transform.translation = Val2::new(Val::ZERO, vmin(-3.0 * (*t * 16.0).sin().abs()));
-            let done = settle.filter(|_| *t >= TUMBLE_MIN);
+            if !reduced {
+                transform.rotation = Rot2::radians(*t * TAU * 2.0);
+                transform.translation = Val2::new(Val::ZERO, vmin(-3.0 * (*t * 16.0).sin().abs()));
+            }
+            let min = if reduced { 0.1 } else { TUMBLE_MIN };
+            let done = settle.filter(|_| *t >= min);
             if let Some(v) = done {
                 face = v;
                 state.stage = Stage::Settle { t: 0.0 };
@@ -177,8 +180,10 @@ fn animate_die(
         Stage::Settle { t } => {
             *t += dt;
             let u = (*t / SETTLE).min(1.0);
-            transform.rotation = Rot2::radians(0.35 * (1.0 - u) * (1.0 - u));
-            transform.scale = Vec2::splat(1.0 + 0.2 * (u * PI).sin());
+            if !reduced {
+                transform.rotation = Rot2::radians(0.35 * (1.0 - u) * (1.0 - u));
+                transform.scale = Vec2::splat(1.0 + 0.2 * (u * PI).sin());
+            }
             if u >= 1.0 {
                 state.stage = Stage::Idle;
             }

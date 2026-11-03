@@ -3,6 +3,7 @@
 
 mod board;
 mod dice;
+mod fx;
 mod net;
 mod paint;
 mod play;
@@ -28,6 +29,7 @@ fn main() {
         .add_plugins((
             board::BoardPlugin,
             dice::DicePlugin,
+            fx::FxPlugin,
             play::PlayPlugin,
             ui::UiPlugin,
         ))

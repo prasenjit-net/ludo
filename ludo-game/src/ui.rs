@@ -44,6 +44,7 @@ impl Plugin for UiPlugin {
                 sync_swatches,
                 sync_controls,
                 countdown,
+                turn_banner,
                 button_look,
                 fit_board,
             ),
@@ -87,6 +88,8 @@ enum Field {
     Event,
     Timer,
     Winner,
+    EffectsToggle,
+    MotionToggle,
 }
 
 /// A text box and what it edits.
@@ -132,6 +135,13 @@ struct Choice(u8);
 
 #[derive(Component)]
 struct RollButton;
+
+/// A short "Your turn" pill over the board when the turn changes.
+#[derive(Component)]
+struct Banner;
+
+#[derive(Component)]
+struct BannerText;
 
 #[derive(Component)]
 struct StartButton;
@@ -195,6 +205,26 @@ fn button_w(
 
 fn button(text: impl Into<String>, action: Action, primary: bool, height: f32) -> impl Bundle {
     button_w(text, action, primary, height, None)
+}
+
+/// A button whose label (a `Field`) shows the current state of a setting.
+fn toggle(field: Field, action: Action) -> impl Bundle {
+    (
+        Button,
+        Tint(BUTTON),
+        BackgroundColor(BUTTON),
+        Node {
+            flex_grow: 1.0,
+            flex_basis: px(0),
+            height: vmin(8.0),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            border_radius: BorderRadius::all(vmin(2.0)),
+            ..default()
+        },
+        observe(move |_: On<Activate>, mut session: ResMut<Session>| session.apply(action)),
+        children![(field, label("", 3.2, TEXT))],
+    )
 }
 
 fn row() -> Node {
@@ -467,6 +497,14 @@ fn spawn_ui(mut commands: Commands) {
             text_input(Input::Name),
             heading("Colour"),
             swatches(false),
+            heading("Display"),
+            (
+                row(),
+                children![
+                    toggle(Field::EffectsToggle, Action::ToggleEffects),
+                    toggle(Field::MotionToggle, Action::ToggleReducedMotion),
+                ]
+            ),
             (
                 row(),
                 children![button("Continue", Action::SaveProfile, true, 11.0)]
@@ -569,6 +607,29 @@ fn spawn_ui(mut commands: Commands) {
     ));
 
     commands.spawn((
+        Banner,
+        Node {
+            position_type: PositionType::Absolute,
+            top: vmin(3.0),
+            width: percent(100),
+            justify_content: JustifyContent::Center,
+            display: Display::None,
+            ..default()
+        },
+        GlobalZIndex(5),
+        children![(
+            Node {
+                padding: UiRect::axes(vmin(5.0), vmin(1.8)),
+                border_radius: BorderRadius::all(vmin(4.0)),
+                ..default()
+            },
+            BackgroundColor(ACCENT),
+            UiTransform::default(),
+            children![(BannerText, label("", 6.0, DARK))],
+        )],
+    ));
+
+    commands.spawn((
         overlay(Overlay::GameOver, Color::srgba(0.05, 0.05, 0.07, 0.9)),
         children![
             (Field::Winner, label("", 9.0, ACCENT)),
@@ -659,7 +720,13 @@ fn show_overlays(session: Res<Session>, mut overlays: Query<(&Overlay, &mut Node
     for (overlay, mut node) in &mut overlays {
         let visible = match overlay {
             Overlay::Screen(screen) => *screen == session.screen,
-            Overlay::GameOver => session.screen == Screen::Game && session.winner().is_some(),
+            // Wait for the last move and the die to finish before covering the board.
+            Overlay::GameOver => {
+                session.screen == Screen::Game
+                    && session.winner().is_some()
+                    && !session.animating
+                    && !session.dice_busy
+            }
         };
         node.display = if visible {
             Display::Flex
@@ -667,6 +734,10 @@ fn show_overlays(session: Res<Session>, mut overlays: Query<(&Overlay, &mut Node
             Display::None
         };
     }
+}
+
+fn on_off(on: bool) -> &'static str {
+    if on { "on" } else { "off" }
 }
 
 fn sync_fields(
@@ -694,6 +765,15 @@ fn sync_fields(
             },
             Field::Page => format!("{} / {}", session.page + 1, session.page_count()),
             Field::ProfileName => session.profile.name.clone(),
+            Field::EffectsToggle => {
+                format!("Effects: {}", on_off(session.settings.effects))
+            }
+            Field::MotionToggle => {
+                format!(
+                    "Reduced motion: {}",
+                    on_off(session.settings.reduced_motion)
+                )
+            }
             Field::RowTitle(i) => session.row(*i).map(|r| r.name.clone()).unwrap_or_default(),
             Field::RowSub(i) => session
                 .row(*i)
@@ -1038,5 +1118,106 @@ fn fit_board(
     let target = Vec3::new(-offset.x, offset.y, camera_tf.translation.z);
     if camera_tf.translation != target {
         camera_tf.translation = target;
+    }
+}
+
+const BANNER_SECS: f32 = 1.4;
+
+#[derive(Default)]
+struct BannerState {
+    /// The turn we last looked at: game generation and seat.
+    last: Option<(u32, usize)>,
+    /// A message waiting for the board to settle.
+    pending: Option<(String, Color)>,
+    /// Seconds since the banner appeared.
+    shown: Option<f32>,
+}
+
+/// Announce whose turn it is: "Your turn" online, the colour's turn on a shared screen.
+fn turn_banner(
+    time: Res<Time>,
+    session: Res<Session>,
+    mut state: Local<BannerState>,
+    mut banner: Query<(&mut Node, &Children), With<Banner>>,
+    mut pills: Query<(&mut BackgroundColor, &mut UiTransform, &Children), Without<Banner>>,
+    mut texts: Query<(&mut Text, &mut TextColor), With<BannerText>>,
+) {
+    let turn = session
+        .game
+        .as_ref()
+        .filter(|g| g.winner.is_none() && session.screen == Screen::Game)
+        .map(|g| (session.generation, g.turn, g.seats[g.turn]));
+    let Some((generation, seat, player)) = turn else {
+        *state = BannerState::default();
+        for (mut node, _) in &mut banner {
+            node.display = Display::None;
+        }
+        return;
+    };
+    if state.last != Some((generation, seat)) {
+        state.last = Some((generation, seat));
+        state.pending = match (session.in_room, session.you == Some(seat)) {
+            (true, true) => Some(("Your turn".to_string(), player_color(player))),
+            (true, false) => None,
+            (false, _) => Some((format!("{}'s turn", player.name()), player_color(player))),
+        }
+        .filter(|_| session.settings.effects);
+    }
+    if !session.animating
+        && !session.dice_busy
+        && state.shown.is_none()
+        && let Some((message, color)) = state.pending.take()
+    {
+        state.shown = Some(0.0);
+        for (_, children) in &banner {
+            for pill in children {
+                if let Ok((mut bg, _, kids)) = pills.get_mut(*pill) {
+                    bg.0 = color;
+                    let light = color.to_srgba();
+                    let dark_text =
+                        0.299 * light.red + 0.587 * light.green + 0.114 * light.blue > 0.55;
+                    for kid in kids {
+                        if let Ok((mut text, mut tc)) = texts.get_mut(*kid) {
+                            **text = message.clone();
+                            tc.0 = if dark_text { DARK } else { Color::WHITE };
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let Some(t) = state.shown.as_mut() else {
+        return;
+    };
+    *t += time.delta_secs();
+    let t = *t;
+    let visible = t < BANNER_SECS;
+    // Fade in quickly, hold, fade out.
+    let alpha = (t / 0.15).min(1.0) * ((BANNER_SECS - t) / 0.4).clamp(0.0, 1.0);
+    let pop = if session.settings.reduced_motion {
+        1.0
+    } else {
+        0.85 + 0.15 * (t / 0.2).min(1.0)
+    };
+    for (mut node, children) in &mut banner {
+        node.display = if visible {
+            Display::Flex
+        } else {
+            Display::None
+        };
+        for pill in children {
+            if let Ok((mut bg, mut tf, kids)) = pills.get_mut(*pill) {
+                bg.0 = bg.0.with_alpha(alpha);
+                tf.scale = Vec2::splat(pop);
+                for kid in kids {
+                    if let Ok((_, mut tc)) = texts.get_mut(*kid) {
+                        tc.0 = tc.0.with_alpha(alpha);
+                    }
+                }
+            }
+        }
+    }
+    if !visible {
+        state.shown = None;
     }
 }

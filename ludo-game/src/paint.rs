@@ -653,6 +653,37 @@ pub fn pawn(color: Rgb) -> Vec<u8> {
     out
 }
 
+/// Side of the small white particle images, in pixels.
+pub const FX_SIZE: usize = 32;
+
+/// A soft round puff, white with a fading alpha, to be tinted when drawn.
+pub fn soft_disc() -> Vec<u8> {
+    let mut out = Vec::with_capacity(FX_SIZE * FX_SIZE * 4);
+    for y in 0..FX_SIZE {
+        for x in 0..FX_SIZE {
+            let p = Vec2::new(x as f32 + 0.5, y as f32 + 0.5) / FX_SIZE as f32 - Vec2::splat(0.5);
+            let a = (1.0 - p.length() * 2.0).clamp(0.0, 1.0).powf(1.4);
+            out.extend_from_slice(&[255, 255, 255, (a * 255.0 + 0.5) as u8]);
+        }
+    }
+    out
+}
+
+/// A four-pointed sparkle with a faint glow, white, to be tinted when drawn.
+pub fn spark() -> Vec<u8> {
+    let points = star(Vec2::ZERO, 4, 0.5, 0.1);
+    let mut out = Vec::with_capacity(FX_SIZE * FX_SIZE * 4);
+    for y in 0..FX_SIZE {
+        for x in 0..FX_SIZE {
+            let p = Vec2::new(x as f32 + 0.5, y as f32 + 0.5) / FX_SIZE as f32 - Vec2::splat(0.5);
+            let cover = (0.5 - poly(p, &points) * FX_SIZE as f32).clamp(0.0, 1.0);
+            let glow = 0.45 * (1.0 - p.length() * 2.6).clamp(0.0, 1.0).powi(2);
+            out.extend_from_slice(&[255, 255, 255, (cover.max(glow) * 255.0 + 0.5) as u8]);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -674,6 +705,18 @@ mod tests {
         assert_eq!(alpha(0, 0), 0, "outer corner is cut away");
         assert_eq!(alpha(SIDE / 2, SIDE / 2), 255);
         assert_eq!(alpha(SIDE / 2, 6), 255, "frame is solid");
+    }
+
+    #[test]
+    fn particle_images_are_round_and_star_shaped() {
+        let disc = soft_disc();
+        let spark = spark();
+        let a = |img: &[u8], x: usize, y: usize| img[(y * FX_SIZE + x) * 4 + 3];
+        assert_eq!(disc.len(), FX_SIZE * FX_SIZE * 4);
+        assert_eq!(a(&disc, 0, 0), 0);
+        assert!(a(&disc, FX_SIZE / 2, FX_SIZE / 2) > 200);
+        assert_eq!(a(&spark, 0, 0), 0);
+        assert_eq!(a(&spark, FX_SIZE / 2, FX_SIZE / 2), 255);
     }
 
     #[test]
