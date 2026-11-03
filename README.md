@@ -65,7 +65,7 @@ The image is a single server binary (the game is embedded in it) on a distroless
 
 - **First visit:** pick a name and a colour (a random name is pre-filled). They are saved in your browser's local storage, and you can change them from the chip at the top right of the room list.
 - **Room list:** the first screen. Each room shows its name, host, seats taken and whether it is waiting or in game. Tap **Join** on a waiting room, or **Create a room**: give it a name and the number of players it allows (2 to 4). You join your own room straight away and wait for others.
-- **Waiting room:** the host can start once at least 2 players are in; the game also starts by itself when the room is full. You get your preferred colour if it is free, otherwise the first free one, and you can switch to a free colour while waiting.
+- **Waiting room:** the host can start at any time, even alone: every empty seat is filled with an AI player (shown as a bot). The game also starts by itself when the room is full. You get your preferred colour if it is free, otherwise the first free one, and you can switch to a free colour while waiting.
 - **Same screen:** under the room list, start a 2, 3 or 4 player game on one device, no server needed.
 - **Playing:** tap **ROLL**, then tap one of the highlighted tokens. The server rolls the dice and validates every move.
 - **Turn timer:** if you do nothing for 10 seconds, the server plays your turn (it rolls, then makes a sensible move: capture, then reach home, then leave the yard, then advance). Three timeouts in a row remove you from the game.
@@ -82,7 +82,7 @@ The image is a single server binary (the game is embedded in it) on a distroless
 
 ## Known limitations
 
-- Reconnecting relies on the id saved in the browser, so it only works from the same browser. A room with nobody connected is deleted.
+- Reconnecting relies on the id saved in the browser, so it only works from the same browser. A room with no human connected is deleted, bots included.
 - Typing was tested with a keyboard in headless Chrome; I could not check the on-screen keyboard on a physical phone.
 - The wasm bundle is about 15 MB (5.6 MB gzipped; the server gzips responses). Release builds use fat LTO and `opt-level = "z"` to keep it small, so they take a few minutes.
 - Touch and layout were tested in headless Chrome with device emulation, not on a physical phone.

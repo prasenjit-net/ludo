@@ -336,6 +336,72 @@ impl Game {
         })
     }
 
+    /// A stronger choice than `auto_move` for AI players: weighs captures, reaching
+    /// home, safe cells and the risk of being captured on the next turn.
+    pub fn best_move(&self) -> Option<usize> {
+        let dice = self.dice?;
+        let (seat, player) = (self.turn, self.current());
+        self.movable().into_iter().max_by_key(|&t| {
+            let from = self.tokens[seat][t];
+            let to = self.destination(seat, t, dice).unwrap_or(YARD);
+            let mut score = (to - from.max(0)) as i32;
+            let cell = track_cell(player, to);
+            if let Some(c) = cell {
+                score += self.capture_value(seat, c);
+            }
+            if to == HOME {
+                score += 80;
+            } else if to > LAST_TRACK {
+                score += 30; // the home column cannot be attacked
+            }
+            if from == YARD {
+                score += 60;
+            }
+            match cell {
+                Some(c) if is_safe(c) => score += 25,
+                Some(c) => score -= 45 * self.threats(seat, c).min(2) as i32,
+                None => {}
+            }
+            if let Some(c) = track_cell(player, from)
+                && !is_safe(c)
+                && self.threats(seat, c) > 0
+            {
+                score += 40; // run from a token that could capture this one
+            }
+            (score, std::cmp::Reverse(t))
+        })
+    }
+
+    /// Opponent tokens that could capture a token of `seat` standing on `cell`
+    /// with a single roll.
+    fn threats(&self, seat: usize, cell: usize) -> usize {
+        self.opponent_cells(seat)
+            .filter(|&(c, _)| (cell + TRACK_LEN - c) % TRACK_LEN <= 6 && c != cell)
+            .count()
+    }
+
+    /// What landing on `cell` would capture: 100 plus the progress lost, per token.
+    fn capture_value(&self, seat: usize, cell: usize) -> i32 {
+        if is_safe(cell) {
+            return 0;
+        }
+        self.opponent_cells(seat)
+            .filter(|&(c, _)| c == cell)
+            .map(|(_, progress)| 100 + progress as i32)
+            .sum()
+    }
+
+    /// Track cell and progress of every opponent token on the shared track.
+    fn opponent_cells(&self, seat: usize) -> impl Iterator<Item = (usize, i8)> + '_ {
+        (0..self.seats.len())
+            .filter(move |&o| o != seat && !self.left[o])
+            .flat_map(move |o| {
+                self.tokens[o]
+                    .iter()
+                    .filter_map(move |&p| track_cell(self.seats[o], p).map(|c| (c, p)))
+            })
+    }
+
     fn end_turn(&mut self, events: &mut Vec<Event>) {
         self.sixes = 0;
         self.dice = None;
@@ -494,5 +560,97 @@ mod tests {
             None,
             "needs a roll first"
         );
+    }
+
+    /// Tiny deterministic generator so the tests need no extra dependency.
+    struct Lcg(u64);
+    impl Lcg {
+        fn die(&mut self) -> u8 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((self.0 >> 33) % 6) as u8 + 1
+        }
+    }
+
+    /// Play to the end; `smart[seat]` picks `best_move`, otherwise `auto_move`.
+    fn play_out(seats: Vec<Player>, smart: &[bool], rng: &mut Lcg) -> usize {
+        let mut g = Game::new(seats);
+        for _ in 0..20_000 {
+            if g.phase() == Phase::Over {
+                return g.winner.unwrap();
+            }
+            if g.phase() == Phase::Roll {
+                g.roll(rng.die()).unwrap();
+                continue;
+            }
+            let pick = if smart[g.turn] {
+                g.best_move()
+            } else {
+                g.auto_move()
+            };
+            assert!(
+                g.movable().contains(&pick.unwrap()),
+                "bot picked illegal move"
+            );
+            g.play(pick.unwrap()).unwrap();
+        }
+        panic!("game did not finish");
+    }
+
+    #[test]
+    fn best_move_needs_a_pending_roll() {
+        assert_eq!(game().best_move(), None);
+    }
+
+    #[test]
+    fn best_move_captures_runs_and_avoids_danger() {
+        // Capture beats everything else.
+        let mut g = game();
+        g.tokens[0] = [4, 20, YARD, YARD];
+        g.tokens[1][0] = 44; // green on cell 5
+        g.roll(1).unwrap();
+        assert_eq!(g.best_move(), Some(0));
+
+        // Token 0 sits just in front of green's token; a six takes it out of reach,
+        // which beats advancing token 1 by the same amount.
+        let mut g = game();
+        g.tokens[0] = [3, 30, 20, 25];
+        g.tokens[1][0] = 41; // green on cell 2, one behind red's token 0
+        g.roll(6).unwrap();
+        assert_eq!(g.best_move(), Some(0), "escapes the threat");
+
+        // Landing next to a threat is avoided in favour of a safe star (cell 8).
+        let mut g = game();
+        g.tokens[0] = [6, 20, YARD, YARD];
+        g.tokens[1][0] = 33; // green on cell 46: far away from token 0
+        g.tokens[2][0] = 24; // yellow on cell 50
+        g.tokens[3][0] = 0;
+        g.roll(2).unwrap();
+        assert_eq!(g.best_move(), Some(0), "takes the safe star");
+    }
+
+    #[test]
+    fn bots_finish_games_and_best_move_beats_auto_move() {
+        let mut rng = Lcg(7);
+        let mut wins = 0;
+        let games = 400;
+        for i in 0..games {
+            // Alternate who sits first so turn order does not bias the result.
+            let smart = if i % 2 == 0 {
+                [true, false]
+            } else {
+                [false, true]
+            };
+            let winner = play_out(Player::for_count(2), &smart, &mut rng);
+            wins += smart[winner] as usize;
+        }
+        for n in [3, 4] {
+            for _ in 0..50 {
+                play_out(Player::for_count(n), &vec![true; n], &mut rng);
+            }
+        }
+        assert!(wins * 100 > games * 55, "smart bot won only {wins}/{games}");
     }
 }

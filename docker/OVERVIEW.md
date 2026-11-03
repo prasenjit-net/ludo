@@ -14,7 +14,7 @@ Open http://localhost:3000. The first visit asks for a name and a colour, which 
 
 ## Features
 
-- **Online rooms:** browse the live room list, join one, or create your own with a name and a 2 to 4 player limit. The host starts once at least 2 players are in, or the game starts by itself when the room is full.
+- **Online rooms:** browse the live room list, join one, or create your own with a name and a 2 to 4 player limit. The host can start at any time, even alone, and empty seats are filled with AI players; the game starts by itself when the room is full.
 - **Same screen:** 2 to 4 players on one device, with no server needed.
 - **Fair play:** the server rolls the dice and validates every move.
 - **Turn timer:** if a player does nothing for 10 seconds, the server plays their turn. Players who leave are removed and the game goes on while at least 2 remain.

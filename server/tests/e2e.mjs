@@ -45,12 +45,14 @@ bob.send({ type: "set_color", color: "Yellow" });
 const bl2 = await bob.next((m) => m.type === "room" && m.players[1].player === "Yellow");
 check(bl2.players[1].player === "Yellow", "can switch to a free colour");
 
-// host-only start; start with 2 of 3
+// host-only start; start with 2 of 3, the empty seat becomes an AI player
 bob.send({ type: "start_game" });
 check((await bob.next(is("error"))).message.includes("host"), "non-host cannot start");
 ann.send({ type: "start_game" });
 const st = await ann.next(is("state"));
-check(st.game.seats.join() === "Green,Yellow" && st.you === 0 && st.turn_ms > 0, "host starts with 2 players, seats follow board order");
+check(st.game.seats.join() === "Red,Green,Yellow" && st.you === 1, "host starts with 2 of 3, a bot fills the seat in board order");
+check(st.players[0].bot && st.players[0].connected && !st.players[1].bot, "the filled seat is flagged as a bot");
+check(st.turn_ms == null, "no turn countdown while a bot is to play");
 await bob.next(is("state"));
 
 // started room is listed as playing and cannot be joined
@@ -59,13 +61,31 @@ check(rooms[0].playing, "room shows as playing");
 cat.send({ type: "join_room", id: rooms[0].id });
 check((await cat.next(is("error"))).message.includes("started"), "cannot join a started game");
 
-// --- leaving mid-game ends 2-player game ---------------------------------------
+// --- leaving mid-game: bots keep the game going; the room goes with the last human
 bob.send({ type: "leave_room" });
-const over = await ann.next((m) => m.type === "state" && m.game.winner != null);
-check(over.game.winner === 0 && over.events.some((e) => e.Left), "last player wins when the other leaves");
+const after = await ann.next((m) => m.type === "state" && m.game.left[2]);
+check(after.game.winner == null, "game goes on against the bot when the other human leaves");
 ann.send({ type: "leave_room" });
 await bob.next((m) => m.type === "rooms" && m.rooms.length === 0);
-check(true, "finished room disappears from the list");
+check(true, "room disappears when the last human leaves");
+
+// --- a lone host gets bots for every other seat, and they play on their own ----
+const solo = await client("Solo", "Blue");
+const watcher = await client("Watcher", "Red");
+solo.send({ type: "create_room", name: "Solo", players: 4 });
+await solo.next(is("room"));
+solo.send({ type: "start_game" });
+const ss = await solo.next(is("state"));
+check(ss.game.seats.length === 4 && ss.players.filter((p) => p.bot).length === 3, "host alone starts a 4-player game with 3 bots");
+const rolledBy = new Set();
+while (rolledBy.size < 2) {
+  const m = await solo.next((m) => m.type === "state" && m.events.some((e) => e.Rolled && e.Rolled.seat !== ss.you), 10000);
+  m.events.filter((e) => e.Rolled && e.Rolled.seat !== ss.you).forEach((e) => rolledBy.add(e.Rolled.seat));
+}
+check(rolledBy.size >= 2, "bots take their turns without anyone acting for them");
+solo.send({ type: "leave_room" });
+await watcher.next((m) => m.type === "rooms" && m.rooms.length === 0);
+check(true, "bot-only room is removed");
 
 // --- auto-start when full, leave continues with 3, timeout autoplay ------------
 const [p1, p2, p3] = [await client("P1", "Red"), await client("P2", "Green"), await client("P3", "Yellow")];
