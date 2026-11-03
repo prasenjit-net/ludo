@@ -1,18 +1,14 @@
 # syntax=docker/dockerfile:1
 
 # ---- build: wasm game (trunk) + server with the game embedded -----------------
-FROM rust:1-bookworm AS build
+# trunk's release binaries need glibc 2.39+, so build on Debian 13 (and run on the matching base).
+FROM rust:1-trixie AS build
 
-ARG TARGETARCH
 ARG TRUNK_VERSION=0.22.1
 
 RUN rustup target add wasm32-unknown-unknown
-RUN case "${TARGETARCH:-amd64}" in \
-      amd64) arch=x86_64 ;; \
-      arm64) arch=aarch64 ;; \
-      *) echo "unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; \
-    esac \
- && curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-${arch}-unknown-linux-gnu.tar.gz" \
+# trunk publishes Linux binaries for x86_64 and aarch64; `uname -m` uses the same names.
+RUN curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-$(uname -m)-unknown-linux-gnu.tar.gz" \
     | tar -xz -C /usr/local/bin
 
 WORKDIR /app
@@ -30,7 +26,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
  && cp target/release/server /ludo-server
 
 # ---- runtime: one static-ish binary, no shell ----------------------------------
-FROM gcr.io/distroless/cc-debian12:nonroot
+FROM gcr.io/distroless/cc-debian13:nonroot
 
 COPY --from=build /ludo-server /ludo-server
 
