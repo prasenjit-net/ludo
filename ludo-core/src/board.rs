@@ -54,7 +54,7 @@ impl Player {
 
     fn yard_spot(self, token: usize) -> (f32, f32) {
         let (c, r) = self.yard_origin();
-        let dx = if token % 2 == 0 { -1.0 } else { 1.0 };
+        let dx = if token.is_multiple_of(2) { -1.0 } else { 1.0 };
         let dy = if token < 2 { -1.0 } else { 1.0 };
         (c as f32 + 2.5 + dx, r as f32 + 2.5 + dy)
     }

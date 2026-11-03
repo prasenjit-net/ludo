@@ -67,7 +67,7 @@ pub fn track_cell(player: Player, progress: i8) -> Option<usize> {
 
 /// Start cells and the star cells 8 steps after them are safe from capture.
 pub fn is_safe(cell: usize) -> bool {
-    cell % 13 == 0 || cell % 13 == 8
+    cell.is_multiple_of(13) || cell % 13 == 8
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]

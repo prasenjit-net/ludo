@@ -6,6 +6,8 @@ default-members = ["server"]
 [workspace.package]
 edition = "2024"
 version = "0.1.0"
+# Bevy 0.20 needs at least this.
+rust-version = "1.97"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

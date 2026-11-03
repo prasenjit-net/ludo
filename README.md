@@ -33,6 +33,25 @@ make run      # build the game, then serve it at http://127.0.0.1:3000
 
 The game is embedded at compile time, so the server must be rebuilt after the game changes. `make run` does this for you.
 
+## Docker
+
+```sh
+docker build -t ludo .                   # builds the game and the server inside the image
+docker run --rm -p 3000:3000 ludo        # then open http://localhost:3000
+```
+
+The image is a single server binary (the game is embedded in it) on a distroless base; set `LUDO_ADDR` to change the listen address and `LUDO_TURN_MS` to change the turn timer. Released images are published on Docker Hub (see below).
+
+## CI and releases
+
+- **CI** (`.github/workflows/ci.yml`) runs on every push to `main` and on pull requests: `cargo fmt --check`, clippy (also for the wasm game), unit tests, the server end-to-end test, a full game + server build (the server binary is kept as an artifact for 14 days) and a Docker build check.
+- **Release** (`.github/workflows/release.yml`) is run by hand from the Actions tab (**Run workflow**, on `main`) with a **patch**, **minor** or **major** bump. It runs CI, then builds and pushes the Docker image to Docker Hub as `<version>` and `latest`, and only then bumps the version in `Cargo.toml`, commits `Release vX.Y.Z`, tags it and creates the GitHub release with generated notes.
+- Set up once in the repository settings:
+  - secret `DOCKERHUB_USERNAME`, and secret `DOCKERHUB_TOKEN` (a Docker Hub access token with write access),
+  - optionally the variable `DOCKERHUB_IMAGE` (e.g. `myorg/ludo`); the default is `<DOCKERHUB_USERNAME>/ludo`.
+- The release job pushes to `main` with the built-in `GITHUB_TOKEN`, so `main` must allow that (no branch protection that blocks the Actions bot).
+- Images are built for `linux/amd64`.
+
 ## How to play
 
 - **First visit:** pick a name and a colour (a random name is pre-filled). They are saved in your browser's local storage, and you can change them from the chip at the top right of the room list.

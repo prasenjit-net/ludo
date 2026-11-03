@@ -135,8 +135,7 @@ fn sync_tokens(
 
     if new_game {
         for (seat, &player) in game.seats.iter().enumerate() {
-            for idx in 0..TOKENS {
-                let p = positions[seat][idx];
+            for (idx, &p) in positions[seat].iter().enumerate() {
                 commands
                     .spawn((
                         Token { seat, idx },

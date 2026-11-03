@@ -1,3 +1,6 @@
+// Bevy systems take many parameters and queries have long types by design.
+#![allow(clippy::type_complexity, clippy::too_many_arguments)]
+
 mod board;
 mod net;
 mod play;

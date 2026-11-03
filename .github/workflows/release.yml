@@ -1,0 +1,140 @@
+name: Release
+
+# Manual release: pick patch, minor or major. This bumps the workspace version,
+# builds and pushes the Docker image to Docker Hub, tags the commit and creates
+# the GitHub release.
+#
+# Needs: secrets DOCKERHUB_USERNAME and DOCKERHUB_TOKEN (a Docker Hub access token);
+# optionally the variable DOCKERHUB_IMAGE (default: <username>/ludo).
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    name: CI
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/ci.yml
+    with:
+      skip_docker: true
+
+  version:
+    name: Work out the version
+    needs: ci
+    runs-on: ubuntu-latest
+    outputs:
+      current: ${{ steps.v.outputs.current }}
+      next: ${{ steps.v.outputs.next }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          current=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          [[ "$current" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || { echo "cannot read version from Cargo.toml"; exit 1; }
+          major=${BASH_REMATCH[1]}; minor=${BASH_REMATCH[2]}; patch=${BASH_REMATCH[3]}
+          case "$BUMP" in
+            major) next="$((major + 1)).0.0" ;;
+            minor) next="$major.$((minor + 1)).0" ;;
+            patch) next="$major.$minor.$((patch + 1))" ;;
+            *) echo "unknown bump: $BUMP"; exit 1 ;;
+          esac
+          if git ls-remote --exit-code --tags origin "refs/tags/v$next" >/dev/null 2>&1; then
+            echo "tag v$next already exists"; exit 1
+          fi
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          echo "next=$next" >> "$GITHUB_OUTPUT"
+          echo "Releasing $current -> $next ($BUMP)" >> "$GITHUB_STEP_SUMMARY"
+
+  docker:
+    name: Build and push Docker image
+    needs: version
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.image.outputs.name }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: image
+        env:
+          USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          IMAGE: ${{ vars.DOCKERHUB_IMAGE }}
+        run: echo "name=${IMAGE:-$USERNAME/ludo}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ steps.image.outputs.name }}:${{ needs.version.outputs.next }}
+            ${{ steps.image.outputs.name }}:latest
+          labels: |
+            org.opencontainers.image.title=ludo
+            org.opencontainers.image.version=${{ needs.version.outputs.next }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  release:
+    name: Tag and publish the release
+    needs: [version, docker]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Bump the version
+        env:
+          CURRENT: ${{ needs.version.outputs.current }}
+          NEXT: ${{ needs.version.outputs.next }}
+        run: |
+          sed -i '/^\[workspace\.package\]/,/^\[/s/^version = "'"$CURRENT"'"/version = "'"$NEXT"'"/' Cargo.toml
+          grep -q "^version = \"$NEXT\"" Cargo.toml
+          cargo update --workspace
+      - name: Commit, tag and push
+        env:
+          NEXT: ${{ needs.version.outputs.next }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Release v$NEXT"
+          git tag -a "v$NEXT" -m "v$NEXT"
+          git push origin HEAD:main "v$NEXT"
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEXT: ${{ needs.version.outputs.next }}
+          IMAGE: ${{ needs.docker.outputs.image }}
+        run: |
+          cat > notes.md <<NOTES
+          ## Run it
+
+          \`\`\`sh
+          docker run --rm -p 3000:3000 $IMAGE:$NEXT
+          \`\`\`
+
+          Then open http://localhost:3000.
+
+          ## What's changed
+          NOTES
+          gh release create "v$NEXT" --title "v$NEXT" --notes-file notes.md --generate-notes

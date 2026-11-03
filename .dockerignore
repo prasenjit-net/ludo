@@ -1,0 +1,6 @@
+.git
+.github
+target
+ludo-game/dist
+**/.DS_Store
+*.md
