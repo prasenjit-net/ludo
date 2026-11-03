@@ -22,7 +22,7 @@ const MAX_TIMEOUTS: u8 = 3;
 
 /// How long an AI player "thinks" before each roll and each move, on top of the
 /// time clients need to animate what just happened.
-const BOT_DELAY: Duration = Duration::from_millis(600);
+const BOT_DELAY: Duration = Duration::from_millis(400);
 
 struct Conn {
     tx: Tx,

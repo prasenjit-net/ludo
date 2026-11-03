@@ -86,7 +86,6 @@ enum Field {
     Status,
     Event,
     Timer,
-    Die,
     Winner,
 }
 
@@ -443,18 +442,7 @@ fn spawn_ui(mut commands: Commands) {
                     (
                         row(),
                         children![
-                            (
-                                Node {
-                                    width: vmin(18.0),
-                                    height: vmin(18.0),
-                                    justify_content: JustifyContent::Center,
-                                    align_items: AlignItems::Center,
-                                    border_radius: BorderRadius::all(vmin(3.0)),
-                                    ..default()
-                                },
-                                BackgroundColor(TEXT),
-                                children![(Field::Die, label("-", 11.0, DARK))],
-                            ),
+                            crate::dice::die(vmin(18.0)),
                             (button("ROLL", Action::Roll, true, 18.0), RollButton),
                         ],
                     ),
@@ -734,7 +722,6 @@ fn sync_fields(
             },
             Field::Status => session.status(),
             Field::Event => session.last_event.clone().unwrap_or_default(),
-            Field::Die => session.die().map_or("-".into(), |d| d.to_string()),
             Field::Winner => session
                 .winner()
                 .map_or(String::new(), |s| format!("{} wins!", session.name(s))),

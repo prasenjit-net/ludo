@@ -2,6 +2,7 @@
 #![allow(clippy::type_complexity, clippy::too_many_arguments)]
 
 mod board;
+mod dice;
 mod net;
 mod play;
 mod session;
@@ -23,6 +24,11 @@ fn main() {
             ..default()
         }))
         .insert_resource(ClearColor(Color::srgb(0.12, 0.12, 0.14)))
-        .add_plugins((board::BoardPlugin, play::PlayPlugin, ui::UiPlugin))
+        .add_plugins((
+            board::BoardPlugin,
+            dice::DicePlugin,
+            play::PlayPlugin,
+            ui::UiPlugin,
+        ))
         .run();
 }

@@ -90,6 +90,13 @@ pub struct Session {
     pub pending: Vec<Event>,
     /// Tokens are still moving; the player cannot act until they land.
     pub animating: bool,
+    /// The die is still tumbling; the player cannot act until it settles.
+    pub dice_busy: bool,
+    /// Our roll is on its way to the server.
+    pub rolling: bool,
+    /// How many rolls have been seen, and by which seat the last one was.
+    pub roll_count: u32,
+    pub last_roller: Option<usize>,
     pub error: Option<String>,
     /// Seconds before the server plays the current turn, and a counter that
     /// changes whenever the server sends a fresh value.
@@ -135,6 +142,10 @@ impl Session {
             last_event: None,
             pending: Vec::new(),
             animating: false,
+            dice_busy: false,
+            rolling: false,
+            roll_count: 0,
+            last_roller: None,
             error: None,
             turn_secs: None,
             turn_rev: 0,
@@ -150,6 +161,8 @@ impl Session {
         self.game.as_ref().is_some_and(|g| {
             g.phase() != Phase::Over
                 && !self.animating
+                && !self.dice_busy
+                && !self.rolling
                 && (!self.in_room || self.you == Some(g.turn))
         })
     }
@@ -326,6 +339,9 @@ impl Session {
         self.last_event = None;
         self.pending.clear();
         self.animating = false;
+        self.dice_busy = false;
+        self.rolling = false;
+        self.last_roller = None;
         self.turn_secs = None;
         self.generation += 1;
         self.rev += 1;
@@ -337,6 +353,8 @@ impl Session {
         self.pending.clear();
         self.last_event = None;
         self.last_roll = None;
+        self.last_roller = None;
+        self.rolling = false;
         self.generation += 1;
         self.rev += 1;
     }
@@ -346,6 +364,7 @@ impl Session {
             return;
         }
         if self.in_room {
+            self.rolling = true;
             net::send(&ClientMsg::Roll);
         } else if let Some(game) = &mut self.game
             && let Ok(events) = game.roll(random_die())
@@ -442,15 +461,21 @@ impl Session {
                 self.screen = Screen::Rooms;
                 self.error = Some(reason);
             }
-            ServerMsg::Error { message } => self.error = Some(message),
+            ServerMsg::Error { message } => {
+                self.rolling = false;
+                self.error = Some(message);
+            }
         }
     }
 
     fn apply_events(&mut self, events: Vec<Event>) {
         self.pending.extend(events.iter().cloned());
         for e in &events {
-            if let Event::Rolled { value, .. } = e {
+            if let Event::Rolled { seat, value } = e {
                 self.last_roll = Some(*value);
+                self.last_roller = Some(*seat);
+                self.roll_count += 1;
+                self.rolling = false;
             }
             if let Some(line) = self.describe(e) {
                 self.last_event = Some(line);
@@ -474,6 +499,6 @@ impl Session {
     }
 }
 
-fn random_die() -> u8 {
+pub fn random_die() -> u8 {
     (js_sys::Math::random() * 6.0) as u8 % 6 + 1
 }

@@ -8,7 +8,7 @@ use crate::{
 use bevy::{prelude::*, window::PrimaryWindow};
 use ludo_core::{
     Event, Game, HOME, TOKENS,
-    board::{FLY_MS, HOP_MS, POP_MS, path, token_pos},
+    board::{FLY_MS, HOP_MS, POP_MS, ROLL_MS, path, token_pos},
 };
 use std::collections::{HashMap, VecDeque};
 
@@ -268,7 +268,12 @@ fn queue_events(
 ) {
     // Seconds into this batch at which the latest move finishes; a capture
     // waits for the capturing token to land.
-    let mut clock = 0.0;
+    // A roll in the same batch plays out before anything moves.
+    let mut clock = if events.iter().any(|e| matches!(e, Event::Rolled { .. })) {
+        ROLL_MS as f32 / 1000.0
+    } else {
+        0.0
+    };
     for event in events {
         match *event {
             Event::Moved {
@@ -295,6 +300,9 @@ fn queue_events(
                         kind: Kind::Pop,
                         ..last
                     });
+                }
+                if let Some(first) = steps.first_mut() {
+                    first.wait = clock;
                 }
                 clock += steps.iter().map(Step::secs).sum::<f32>();
                 if let Some((_, _, mut motion, _)) = tokens

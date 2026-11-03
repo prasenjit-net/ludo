@@ -78,6 +78,8 @@ pub fn token_pos(player: Player, token: usize, progress: i8) -> (f32, f32) {
 /// How long one hop of a token takes on screen, in milliseconds. The client
 /// animates with these and the server paces bot turns by them.
 pub const HOP_MS: u64 = 120;
+/// The dice tumbling and settling on its value.
+pub const ROLL_MS: u64 = 650;
 /// A captured token flying back to its yard.
 pub const FLY_MS: u64 = 450;
 /// The pop of a token arriving home.
@@ -109,6 +111,7 @@ pub fn animation_ms(events: &[Event]) -> u64 {
                 hops * HOP_MS + if to == HOME { POP_MS } else { 0 }
             }
             Event::Captured { .. } => FLY_MS,
+            Event::Rolled { .. } => ROLL_MS,
             _ => 0,
         })
         .sum()
@@ -196,5 +199,7 @@ mod tests {
             animation_ms(&[out, cap, Event::ExtraTurn { seat: 0 }]),
             HOP_MS + FLY_MS
         );
+        let rolled = Event::Rolled { seat: 0, value: 4 };
+        assert_eq!(animation_ms(&[rolled]), ROLL_MS);
     }
 }
