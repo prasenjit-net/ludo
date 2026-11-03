@@ -4,6 +4,7 @@
 
 use ludo_core::{
     Event, Game, Phase, Player,
+    board::animation_ms,
     protocol::{LobbyPlayer, RoomInfo, ServerMsg},
 };
 use rand::Rng;
@@ -19,8 +20,9 @@ pub type Tx = UnboundedSender<ServerMsg>;
 /// A player who lets this many turns time out in a row is removed from the game.
 const MAX_TIMEOUTS: u8 = 3;
 
-/// How long an AI player "thinks" before each roll and each move.
-const BOT_DELAY: Duration = Duration::from_millis(800);
+/// How long an AI player "thinks" before each roll and each move, on top of the
+/// time clients need to animate what just happened.
+const BOT_DELAY: Duration = Duration::from_millis(400);
 
 struct Conn {
     tx: Tx,
@@ -102,13 +104,15 @@ impl Room {
 
     /// When the current turn must be played automatically: soon for an AI
     /// player, after the turn time for a person, never once the game is over.
-    fn next_deadline(&self, turn_time: Duration) -> Option<Instant> {
+    /// `events` are what just happened; a bot waits for them to finish animating.
+    fn next_deadline(&self, turn_time: Duration, events: &[Event]) -> Option<Instant> {
         let game = self.game.as_ref().filter(|g| g.phase() != Phase::Over)?;
-        let wait = if self.members[game.turn].bot {
-            BOT_DELAY
-        } else {
-            turn_time
-        };
+        let wait = Duration::from_millis(animation_ms(events))
+            + if self.members[game.turn].bot {
+                BOT_DELAY
+            } else {
+                turn_time
+            };
         Some(Instant::now() + wait)
     }
 
@@ -236,7 +240,7 @@ impl Inner {
         // Seats follow board order so turns go clockwise.
         room.members.sort_by_key(|m| m.color.index());
         room.game = Some(Game::new(room.members.iter().map(|m| m.color).collect()));
-        room.deadline = room.next_deadline(turn_time);
+        room.deadline = room.next_deadline(turn_time, &[]);
         self.push_room(id, Vec::new());
         self.push_rooms();
     }
@@ -493,7 +497,7 @@ impl Hub {
         match action(game) {
             Ok(events) => {
                 room.members[seat].timeouts = 0;
-                room.deadline = room.next_deadline(self.turn_time);
+                room.deadline = room.next_deadline(self.turn_time, &events);
                 inner.push_room(id, events);
             }
             Err(e) => inner.error(conn, &e.to_string()),
@@ -543,7 +547,7 @@ impl Hub {
                     kicked = room.members[seat].conn.take();
                 }
             }
-            room.deadline = room.next_deadline(self.turn_time);
+            room.deadline = room.next_deadline(self.turn_time, &events);
             let alive = room.anyone_connected();
             if let Some(conn) = kicked {
                 if let Some(c) = inner.conns.get_mut(&conn) {
