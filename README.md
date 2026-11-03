@@ -78,3 +78,9 @@ The image is a single server binary (the game is embedded in it) on a distroless
 - The wasm bundle is about 15 MB (5.6 MB gzipped; the server gzips responses). Release builds use fat LTO and `opt-level = "z"` to keep it small, so they take a few minutes.
 - Touch and layout were tested in headless Chrome with device emulation, not on a physical phone.
 - Rooms live in server memory and are lost on restart.
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT), at your option. Unless you state otherwise, any contribution you submit for inclusion in this project is dual-licensed as above, without additional terms.
+
+The game embeds the Fira Mono font that ships with Bevy (SIL Open Font License 1.1).
