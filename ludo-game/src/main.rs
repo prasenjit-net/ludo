@@ -4,6 +4,7 @@
 mod board;
 mod dice;
 mod net;
+mod paint;
 mod play;
 mod session;
 mod store;

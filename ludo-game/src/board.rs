@@ -1,15 +1,16 @@
-//! The static Ludo board, drawn from the geometry in `ludo-core`.
+//! The Ludo board, laid out from the geometry in `ludo-core`.
 
-use bevy::prelude::*;
-use ludo_core::{
-    Player,
-    board::{GRID, TRACK},
+use crate::paint;
+use bevy::{
+    asset::RenderAssetUsages,
+    prelude::*,
+    render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
+use ludo_core::{Player, board::GRID};
 
 pub const CELL: f32 = 40.0;
 /// World size of the board square plus a small margin.
 pub const EXTENT: f32 = GRID as f32 * CELL + 40.0;
-const GAP: f32 = 2.0;
 
 pub struct BoardPlugin;
 
@@ -39,72 +40,30 @@ pub fn cell_pos(col: f32, row: f32) -> Vec2 {
     Vec2::new((col - mid) * CELL, (mid - row) * CELL)
 }
 
-fn tile(commands: &mut Commands, col: f32, row: f32, size: f32, z: f32, color: Color) {
-    let p = cell_pos(col, row);
+/// The board is one sprite with a texture painted at startup (see `paint`).
+fn spawn_board(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+    let colors = Player::ALL.map(|p| {
+        let c = player_color(p).to_srgba();
+        [c.red, c.green, c.blue]
+    });
+    let side = paint::SIDE as u32;
+    let image = Image::new(
+        Extent3d {
+            width: side,
+            height: side,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        paint::render(colors),
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    );
     commands.spawn((
-        Sprite::from_color(color, Vec2::splat(size * CELL - GAP)),
-        Transform::from_xyz(p.x, p.y, z),
-    ));
-}
-
-fn spawn_board(mut commands: Commands) {
-    let white = Color::srgb(0.96, 0.95, 0.92);
-    let star = Color::srgb(0.80, 0.78, 0.72);
-
-    commands.spawn((
-        Sprite::from_color(
-            Color::srgb(0.2, 0.2, 0.24),
-            Vec2::splat(GRID as f32 * CELL + 16.0),
-        ),
+        Sprite {
+            image: images.add(image),
+            custom_size: Some(Vec2::splat(EXTENT)),
+            ..default()
+        },
         Transform::from_xyz(0.0, 0.0, -1.0),
     ));
-
-    // Shared track; start cells and star cells (safe squares) get a tint below.
-    for (i, &(col, row)) in TRACK.iter().enumerate() {
-        let safe = i % 13 == 8;
-        tile(
-            &mut commands,
-            col as f32,
-            row as f32,
-            1.0,
-            0.0,
-            if safe { star } else { white },
-        );
-    }
-
-    for player in Player::ALL {
-        let color = player_color(player);
-
-        // Yard: coloured 6x6 block with a white 4x4 inset and four token spots.
-        let (yc, yr) = player.yard_origin();
-        let (c, r) = (yc as f32 + 2.5, yr as f32 + 2.5);
-        tile(&mut commands, c, r, 6.0, 0.0, color);
-        tile(&mut commands, c, r, 4.0, 0.1, white);
-        for (dc, dr) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
-            tile(
-                &mut commands,
-                c + dc,
-                r + dr,
-                1.0,
-                0.2,
-                color.with_alpha(0.45),
-            );
-        }
-
-        let (sc, sr) = TRACK[player.start_index()];
-        tile(&mut commands, sc as f32, sr as f32, 1.0, 0.1, color);
-        for (hc, hr) in player.home_column() {
-            tile(&mut commands, hc as f32, hr as f32, 1.0, 0.1, color);
-        }
-    }
-
-    // Centre: four quadrants, coloured like the yard in that corner.
-    for (c, r, player) in [
-        (6.25, 6.25, Player::Red),
-        (7.75, 6.25, Player::Green),
-        (7.75, 7.75, Player::Yellow),
-        (6.25, 7.75, Player::Blue),
-    ] {
-        tile(&mut commands, c, r, 1.5, 0.1, player_color(player));
-    }
 }

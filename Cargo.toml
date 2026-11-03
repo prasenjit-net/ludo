@@ -20,6 +20,10 @@ ludo-core = { path = "ludo-core" }
 [profile.dev.package."*"]
 opt-level = 2
 
+# The board texture is painted on startup; keep that quick in dev builds too.
+[profile.dev.package.ludo-game]
+opt-level = 2
+
 [profile.release]
 opt-level = "z"
 lto = "fat"
