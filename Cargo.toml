@@ -1,0 +1,17 @@
+[workspace]
+resolver = "3"
+members = ["ludo-game", "server"]
+default-members = ["server"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+
+# Keep dev builds of dependencies (Bevy) reasonably fast.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1

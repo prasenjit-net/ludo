@@ -1,0 +1,7 @@
+[package]
+name = "ludo-game"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bevy = { version = "0.20", default-features = false, features = ["2d", "webgl2"] }
