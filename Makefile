@@ -1,4 +1,4 @@
-.PHONY: all game server run dev check clean
+.PHONY: all game server run dev check test clean
 
 all: server
 
@@ -14,9 +14,13 @@ server: game
 run: game
 	cargo run --release -p server
 
-# Hot-reloading dev server for the game only (trunk, port 8080).
+# Hot-reloading dev server for the game (trunk, port 8080); needs `cargo run -p server` for online play.
 dev:
 	cd ludo-game && trunk serve
+
+# Rules engine and server unit tests.
+test:
+	cargo test -p ludo-core -p server
 
 check:
 	cargo check -p server

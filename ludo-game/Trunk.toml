@@ -1,3 +1,8 @@
 [build]
 target = "index.html"
 dist = "dist"
+
+# `trunk serve` (make dev): forward the online-play socket to the real server.
+[[proxy]]
+backend = "ws://127.0.0.1:3000/ws"
+ws = true

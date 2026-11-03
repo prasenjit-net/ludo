@@ -1,11 +1,16 @@
 [workspace]
 resolver = "3"
-members = ["ludo-game", "server"]
+members = ["ludo-core", "ludo-game", "server"]
 default-members = ["server"]
 
 [workspace.package]
 edition = "2024"
 version = "0.1.0"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ludo-core = { path = "ludo-core" }
 
 # Keep dev builds of dependencies (Bevy) reasonably fast.
 [profile.dev.package."*"]
