@@ -94,7 +94,7 @@ enum Field {
 
 /// A text box and what it edits.
 #[derive(Component, Clone, Copy, PartialEq)]
-enum Input {
+pub(crate) enum Input {
     Name,
     RoomName,
 }
