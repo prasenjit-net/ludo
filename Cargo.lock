@@ -3791,14 +3791,14 @@ dependencies = [
 
 [[package]]
 name = "ludo-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "ludo-game"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bevy",
  "js-sys",
@@ -5176,7 +5176,7 @@ dependencies = [
 
 [[package]]
 name = "server"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "axum",
  "futures-util",
