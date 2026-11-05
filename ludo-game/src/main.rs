@@ -4,6 +4,7 @@
 mod board;
 mod dice;
 mod fx;
+mod keyboard;
 mod net;
 mod paint;
 mod play;
@@ -30,6 +31,7 @@ fn main() {
             board::BoardPlugin,
             dice::DicePlugin,
             fx::FxPlugin,
+            keyboard::KeyboardPlugin,
             play::PlayPlugin,
             ui::UiPlugin,
         ))
