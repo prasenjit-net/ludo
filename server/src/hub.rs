@@ -210,7 +210,9 @@ impl Room {
             return;
         }
         if let (Some(deadline), Some(latest)) = (self.deadline.as_mut(), self.latest) {
-            let soonest = now + MIN_RETURN.min(timing.turn);
+            // The floor is capped too, or rapid flapping would keep moving it.
+            let grace = MIN_RETURN.min(timing.turn);
+            let soonest = (now + grace).min(latest + grace);
             *deadline = (now + member.turn_wait(timing)).min(latest).max(soonest);
         }
     }
