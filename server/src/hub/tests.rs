@@ -11,6 +11,14 @@ const TIMING: Timing = Timing {
     lobby_grace: Duration::from_secs(60),
 };
 
+/// The reconnect outcome in the `Welcome`, which comes first.
+fn outcome(rx: &mut UnboundedReceiver<ServerMsg>) -> Option<Resumed> {
+    match rx.try_recv() {
+        Ok(ServerMsg::Welcome { resume, .. }) => resume,
+        other => panic!("expected a welcome, got {other:?}"),
+    }
+}
+
 struct World {
     hub: Hub,
     now: Instant,
@@ -25,15 +33,19 @@ impl World {
     }
 
     fn connect(&self, conn: u64, client: &str) -> UnboundedReceiver<ServerMsg> {
+        self.rejoin(conn, client, None)
+    }
+
+    /// Connect, claiming to be in `room`.
+    fn rejoin(&self, conn: u64, client: &str, room: Option<u32>) -> UnboundedReceiver<ServerMsg> {
         let (tx, rx) = unbounded_channel();
-        self.hub.hello(
-            conn,
-            tx,
-            client.into(),
-            client.into(),
-            Player::Red,
-            self.now,
-        );
+        let hello = Hello {
+            client_id: client.into(),
+            name: client.into(),
+            color: Player::Red,
+            room,
+        };
+        self.hub.hello(conn, tx, hello, self.now);
         rx
     }
 
@@ -82,7 +94,8 @@ fn an_offline_player_keeps_their_seat_however_long_they_are_gone() {
     w.run(200);
     assert!(w.room(|r| !r.game.as_ref().unwrap().left[b]).unwrap());
 
-    let mut rx = w.connect(3, "b");
+    let mut rx = w.rejoin(3, "b", Some(1));
+    assert_eq!(outcome(&mut rx), Some(Resumed::Game));
     assert!(matches!(
         rx.try_recv(),
         Ok(ServerMsg::State { you, .. }) if you == b
@@ -116,7 +129,7 @@ fn acting_ends_idleness() {
         room.members[turn].timeouts = 3;
         room.members[turn].conn.unwrap()
     };
-    w.hub.act(conn, w.now, |g| g.roll(3));
+    w.hub.act(conn, None, w.now, |g| g.roll(3));
     assert!(
         w.room(|r| !r.members[turn].idle && r.members[turn].timeouts == 0)
             .unwrap()
@@ -256,4 +269,86 @@ fn an_empty_waiting_room_is_removed_after_the_grace_period() {
     assert!(w.room(|_| ()).is_some());
     w.run(2);
     assert!(w.room(|_| ()).is_none());
+}
+
+#[test]
+fn a_late_request_is_rejected() {
+    let w = World::new();
+    let mut a = w.connect(1, "a");
+    w.connect(2, "b");
+    w.hub.create_room(1, "duel", 2, w.now);
+    w.hub.join_room(2, 1, w.now);
+    let (conn, before) = w
+        .room(|r| {
+            let m = &r.members[r.game.as_ref().unwrap().turn];
+            (m.conn.unwrap(), r.rev)
+        })
+        .unwrap();
+    while a.try_recv().is_ok() {}
+    w.hub.act(conn, Some(before), w.now, |g| g.roll(3));
+    assert_eq!(w.room(|r| r.rev).unwrap(), before + 1);
+    let after = w.room(|r| r.game.clone()).unwrap();
+
+    // The same tap again, against what is no longer on screen.
+    w.hub.act(conn, Some(before), w.now, |g| g.roll(6));
+    assert_eq!(w.room(|r| r.game.clone()).unwrap(), after);
+    if conn == 1 {
+        let stale = std::iter::from_fn(|| a.try_recv().ok()).any(|m| {
+            matches!(
+                m,
+                ServerMsg::Error {
+                    code: ErrorCode::Stale,
+                    ..
+                }
+            )
+        });
+        assert!(stale);
+    }
+}
+
+#[test]
+fn a_returner_is_told_what_became_of_the_game() {
+    // Finished: "b" wins by "a" leaving while "b" is away.
+    let w = World::new();
+    w.duel();
+    w.hub.disconnect(2, w.now);
+    w.hub.leave(1, w.now);
+    let finished = Resumed::Finished { winner: "b".into() };
+    assert_eq!(outcome(&mut w.rejoin(3, "b", Some(1))), Some(finished));
+    assert_eq!(
+        outcome(&mut w.rejoin(4, "a", Some(1))),
+        Some(Resumed::Finished { winner: "b".into() })
+    );
+    assert_eq!(
+        outcome(&mut w.rejoin(5, "stranger", Some(1))),
+        Some(Resumed::NotFound)
+    );
+
+    let mut w = World::new();
+    w.duel();
+    w.hub.disconnect(1, w.now);
+    w.hub.disconnect(2, w.now);
+    w.run(901);
+    assert_eq!(
+        outcome(&mut w.rejoin(3, "a", Some(1))),
+        Some(Resumed::Expired)
+    );
+    assert_eq!(
+        outcome(&mut w.rejoin(4, "a", Some(7))),
+        Some(Resumed::NotFound)
+    );
+    assert_eq!(outcome(&mut w.connect(5, "c")), None);
+}
+
+#[test]
+fn leaving_one_tab_is_reported_to_the_next() {
+    let w = World::new();
+    w.connect(1, "a");
+    w.connect(2, "b");
+    w.connect(3, "c");
+    w.hub.create_room(1, "trio", 3, w.now);
+    w.hub.join_room(2, 1, w.now);
+    w.hub.join_room(3, 1, w.now);
+    w.hub.leave(2, w.now);
+    assert_eq!(outcome(&mut w.rejoin(4, "b", Some(1))), Some(Resumed::Left));
 }

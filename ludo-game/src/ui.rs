@@ -795,6 +795,7 @@ fn sync_fields(
                 (false, false) => "Connecting...".into(),
             },
             Field::Resume => match session.resume {
+                Some(_) if session.restarting => "Server restarting...".into(),
                 Some(Resume::Reconnecting) => "Reconnecting...".into(),
                 Some(Resume::Rejoining) => "Rejoining your game...".into(),
                 None => String::new(),

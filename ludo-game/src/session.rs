@@ -12,7 +12,7 @@ use crate::{
 use bevy::prelude::Resource;
 use ludo_core::{
     Event, Game, Phase, Player,
-    protocol::{ClientMsg, LobbyPlayer, RoomInfo, ServerMsg},
+    protocol::{ClientMsg, ErrorCode, LobbyPlayer, PROTOCOL, Resumed, RoomInfo, ServerMsg},
 };
 
 pub const ROOMS_PER_PAGE: usize = 3;
@@ -87,6 +87,10 @@ pub struct Session {
     pub lost: bool,
     /// Set until the server says whether we still have our seat.
     pub resume: Option<Resume>,
+    /// The server said it was shutting down.
+    pub restarting: bool,
+    /// `rev` of the game on screen, sent back with our requests.
+    game_rev: u64,
     /// We asked to leave and the server has not confirmed it yet.
     leaving: bool,
     /// The room remembered in local storage.
@@ -150,6 +154,8 @@ impl Session {
             connected: false,
             lost: false,
             resume: saved_room.map(|_| Resume::Rejoining),
+            restarting: false,
+            game_rev: 0,
             leaving: false,
             saved_room,
             rooms: Vec::new(),
@@ -355,6 +361,7 @@ impl Session {
             name: self.profile.name.clone(),
             color: self.profile.color,
             heartbeat: true,
+            room: self.saved_room,
         }
     }
 
@@ -406,7 +413,9 @@ impl Session {
         }
         if self.in_room {
             self.rolling = true;
-            net::send(&ClientMsg::Roll);
+            net::send(&ClientMsg::Roll {
+                rev: Some(self.game_rev),
+            });
         } else if let Some(game) = &mut self.game
             && let Ok(events) = game.roll(random_die())
         {
@@ -419,7 +428,10 @@ impl Session {
             return;
         }
         if self.in_room {
-            net::send(&ClientMsg::Play { token });
+            net::send(&ClientMsg::Play {
+                token,
+                rev: Some(self.game_rev),
+            });
         } else if let Some(game) = &mut self.game
             && let Ok(events) = game.play(token)
         {
@@ -466,17 +478,13 @@ impl Session {
 
     fn handle_msg(&mut self, msg: ServerMsg) {
         match msg {
+            ServerMsg::Welcome { protocol, resume } => self.welcomed(protocol, resume),
+            ServerMsg::Restarting => self.restarting = true,
             ServerMsg::Rooms { rooms } => {
                 self.leaving = false;
-                // The room list instead of a snapshot: our seat is gone.
-                if self.resume.take().is_some() {
-                    if self.in_room {
-                        self.clear_game();
-                        self.screen = Screen::Rooms;
-                    }
-                    self.remember(None);
-                    self.error = Some("Your game is no longer available".into());
-                }
+                // Normally `Welcome` has already said so; a room list instead
+                // of a snapshot means our seat is gone all the same.
+                self.seat_lost("Your game is no longer available".into());
                 self.rooms = rooms;
                 self.page = self.page.min(self.page_count() - 1);
             }
@@ -510,7 +518,9 @@ impl Session {
                 game,
                 events,
                 turn_ms,
+                rev,
             } => {
+                self.game_rev = rev;
                 self.resume = None;
                 self.remember((game.phase() != Phase::Over).then_some(id));
                 self.in_room = true;
@@ -536,11 +546,46 @@ impl Session {
                 self.screen = Screen::Rooms;
                 self.error = Some(reason);
             }
-            ServerMsg::Error { message } => {
+            ServerMsg::Error { code, message } => {
                 self.rolling = false;
-                self.error = Some(message);
+                // A late tap needs no complaint; the new state is on its way.
+                if code != ErrorCode::Stale {
+                    self.error = Some(message);
+                }
             }
         }
+    }
+
+    fn welcomed(&mut self, protocol: u32, resume: Option<Resumed>) {
+        // The server has been updated since this page was loaded.
+        if protocol != PROTOCOL && !store::reload_for(protocol) {
+            self.error = Some("Reload the page to update the game".into());
+        }
+        let restarted = std::mem::take(&mut self.restarting);
+        let why = match resume {
+            None | Some(Resumed::Game | Resumed::Lobby) => return,
+            Some(Resumed::Finished { winner }) => format!("That game is over: {winner} won"),
+            Some(Resumed::Expired) => "Your game was closed: nobody came back in time".into(),
+            Some(Resumed::Left) => "You left that game".into(),
+            Some(Resumed::NotFound) if restarted => {
+                "The server restarted and your game was lost".into()
+            }
+            Some(Resumed::NotFound) => "Your game is no longer available".into(),
+        };
+        self.seat_lost(why);
+    }
+
+    /// If we were waiting for a seat back, give up on it and say why.
+    fn seat_lost(&mut self, why: String) {
+        if self.resume.take().is_none() {
+            return;
+        }
+        if self.in_room {
+            self.clear_game();
+            self.screen = Screen::Rooms;
+        }
+        self.remember(None);
+        self.error = Some(why);
     }
 
     fn apply_events(&mut self, events: Vec<Event>) {

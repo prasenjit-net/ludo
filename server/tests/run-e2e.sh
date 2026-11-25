@@ -7,6 +7,6 @@ LUDO_ADDR=127.0.0.1:3100 LUDO_TURN_MS=500 LUDO_AWAY_TURN_MS=700 \
 LUDO_ROOM_GRACE_MS=3000 LUDO_LOBBY_GRACE_MS=1500 LUDO_PING_MS=200 LUDO_DEAD_MS=1000 \
   ./target/debug/server >/dev/null &
 pid=$!
-trap 'kill $pid 2>/dev/null' EXIT
+trap 'kill $pid 2>/dev/null || true' EXIT
 sleep 1
-node server/tests/e2e.mjs
+LUDO_PID=$pid node server/tests/e2e.mjs

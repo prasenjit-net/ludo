@@ -6,7 +6,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let failed = 0;
 const check = (c, m) => { if (!c) { failed++; console.log("FAIL:", m); } else console.log("ok:", m); };
 
-async function client(name, color, id = name + Math.random(), url = URL) {
+async function client(name, color, id = name + Math.random(), url = URL, room = null) {
   const ws = new WebSocket(url); const msgs = []; let waiter = null;
   ws.onmessage = (e) => {
     const m = JSON.parse(e.data);
@@ -17,7 +17,7 @@ async function client(name, color, id = name + Math.random(), url = URL) {
   const c = {
     ws, msgs, id, name,
     send: (m) => ws.send(JSON.stringify(m)),
-    hello: () => c.send({ type: "hello", client_id: id, name, color, heartbeat: true }),
+    hello: () => c.send({ type: "hello", client_id: id, name, color, heartbeat: true, room }),
     // wait for a message matching pred (consumes everything up to and including it)
     next: (pred, ms = 3000) => new Promise((res, rej) => {
       const t = setTimeout(() => rej(new Error("timeout waiting on " + name + " " + pred)), ms);
@@ -142,6 +142,22 @@ const r1b = await client("R1", "Red", "fixed-r1");
 const back = await r1b.next(is("state"));
 check(back.you === 0 && back.players[0].connected, "reconnect with the same client id restores the seat");
 
+// a request made against an old step is refused
+r1b.clear();
+r1b.send({ type: "roll", rev: back.rev + 1000 });
+check((await r1b.next(is("error"))).code === "stale", "an out-of-date request is rejected");
+
+// --- being told what became of a game ------------------------------------------
+r2.ws.close();
+await r1b.next((m) => m.type === "state" && !m.players[1].connected);
+r1b.send({ type: "leave_room" });
+await sleep(100);
+const late = await client("R2", "Yellow", r2.id, URL, idr);
+const told = await late.next(is("welcome"));
+check(told.protocol === 2 && told.resume.outcome === "finished" && told.resume.winner === "R2", "a late returner learns the game finished");
+const lost = await client("Nobody", "Red", "nobody", URL, 9999);
+check((await lost.next(is("welcome"))).resume.outcome === "not_found", "an unknown room is reported as not found");
+
 // --- host handover in a waiting room -------------------------------------------
 const h1 = await client("H1", "Red"), h2 = await client("H2", "Blue");
 h1.send({ type: "create_room", name: "Handover", players: 4 });
@@ -260,10 +276,13 @@ const net1 = await proxy(), net2 = await proxy();
 {
   await duel("Gone", net1.url, net2.url);
   const watcher3 = await client("W3", "Blue");
-  await roomId(watcher3, "Gone");
+  const goneId = await roomId(watcher3, "Gone");
   net1.cut(); net2.cut();
   await watcher3.next((m) => m.type === "rooms" && !m.rooms.some((r) => r.name === "Gone"), 8000);
   check(true, "a game nobody returns to is removed");
+  const tooLate = await client("GoneA", "Red", "Gone-a", URL, goneId);
+  check((await tooLate.next(is("welcome"))).resume.outcome === "expired", "and its player is told it expired");
+  tooLate.ws.close();
   watcher3.ws.close();
 }
 
@@ -285,6 +304,15 @@ const net1 = await proxy(), net2 = await proxy();
   const gone = await guest.next((m) => m.type === "room" && m.players.length === 1, 8000);
   check(gone.host === 0 && gone.you === 0, "after the grace period the place is given up");
   guest.send({ type: "leave_room" });
+}
+
+// --- shutting down -------------------------------------------------------------
+if (process.env.LUDO_PID) {
+  const last = await client("Last", "Red");
+  await last.next(is("rooms"));
+  process.kill(Number(process.env.LUDO_PID), "SIGTERM");
+  await last.next(is("restarting"));
+  check(true, "clients are warned before the server stops");
 }
 
 net1.close();

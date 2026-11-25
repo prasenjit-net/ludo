@@ -11,7 +11,7 @@ publish = false
 ludo-core.workspace = true
 serde_json.workspace = true
 axum = { version = "0.8", features = ["ws"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
 futures-util = "0.3"
 rand = "0.9"
 rust-embed = "8"

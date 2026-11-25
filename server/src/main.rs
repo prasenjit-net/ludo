@@ -12,7 +12,7 @@ use axum::{
     routing::get,
 };
 use futures_util::{SinkExt, StreamExt};
-use hub::{Hub, Timing};
+use hub::{Hello, Hub, Timing};
 use ludo_core::protocol::{ClientMsg, ServerMsg};
 use rust_embed::RustEmbed;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -87,12 +87,34 @@ async fn main() {
         .route("/ws", get(ws_upgrade))
         .fallback(get(serve_static))
         .layer(CompressionLayer::new())
-        .with_state(App { hub, heartbeat });
+        .with_state(App {
+            hub: hub.clone(),
+            heartbeat,
+        });
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .expect("bind address");
     info!("Ludo server listening on http://{addr}");
-    axum::serve(listener, app).await.expect("server error");
+    // Open sockets would hold up a graceful shutdown for ever, so just warn
+    // them and give the warning a moment to go out.
+    tokio::select! {
+        served = axum::serve(listener, app) => served.expect("server error"),
+        () = stop_requested() => {
+            info!("shutting down");
+            hub.announce_restart();
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+}
+
+/// Resolves on Ctrl-C or, as `docker stop` sends, SIGTERM.
+async fn stop_requested() {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut terminate = signal(SignalKind::terminate()).expect("watch SIGTERM");
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = terminate.recv() => {}
+    }
 }
 
 async fn ws_upgrade(ws: WebSocketUpgrade, headers: HeaderMap, State(app): State<App>) -> Response {
@@ -157,9 +179,16 @@ async fn connection(socket: WebSocket, app: App, ip: String) {
                 name,
                 color,
                 heartbeat,
+                room,
             } => {
                 expect_pongs = heartbeat;
-                hub.hello(conn, tx.clone(), client_id, name, color, now);
+                let hello = Hello {
+                    client_id,
+                    name,
+                    color,
+                    room,
+                };
+                hub.hello(conn, tx.clone(), hello, now);
             }
             ClientMsg::Pong => {}
             ClientMsg::CreateRoom { name, players } => hub.create_room(conn, &name, players, now),
@@ -167,11 +196,11 @@ async fn connection(socket: WebSocket, app: App, ip: String) {
             ClientMsg::SetColor { color } => hub.set_color(conn, color, now),
             ClientMsg::StartGame => hub.start(conn, now),
             ClientMsg::LeaveRoom => hub.leave(conn, now),
-            ClientMsg::Roll => {
+            ClientMsg::Roll { rev } => {
                 let value = rand::Rng::random_range(&mut rand::rng(), 1..=6);
-                hub.act(conn, now, |g| g.roll(value));
+                hub.act(conn, rev, now, |g| g.roll(value));
             }
-            ClientMsg::Play { token } => hub.act(conn, now, |g| g.play(token)),
+            ClientMsg::Play { token, rev } => hub.act(conn, rev, now, |g| g.play(token)),
         }
     };
 
@@ -188,10 +217,13 @@ async fn serve_static(uri: Uri) -> Response {
     match Game::get(path) {
         Some(file) => {
             let mime = mime_guess::from_path(path).first_or_octet_stream();
-            Response::builder()
-                .header(header::CONTENT_TYPE, mime.as_ref())
-                .body(Body::from(file.data.into_owned()))
-                .unwrap()
+            let mut response = Response::builder().header(header::CONTENT_TYPE, mime.as_ref());
+            // The page names the current build, so it must not be cached: a
+            // client reloading to update has to get the new one.
+            if path == "index.html" {
+                response = response.header(header::CACHE_CONTROL, "no-cache");
+            }
+            response.body(Body::from(file.data.into_owned())).unwrap()
         }
         None if path == "index.html" => (
             StatusCode::SERVICE_UNAVAILABLE,

@@ -3,6 +3,11 @@
 use crate::{Event, Game, Player};
 use serde::{Deserialize, Serialize};
 
+/// Raise this when a change to these messages would confuse an older client:
+/// the client reloads itself when the server's number differs from its own.
+/// `Welcome` itself has to stay readable by older clients.
+pub const PROTOCOL: u32 = 2;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMsg {
@@ -16,6 +21,9 @@ pub enum ClientMsg {
         /// quiet. Clients from before heartbeats leave this out.
         #[serde(default)]
         heartbeat: bool,
+        /// The room this client believes it is in, to be told what became of it.
+        #[serde(default)]
+        room: Option<u32>,
     },
     /// Answer to `ServerMsg::Ping`.
     Pong,
@@ -34,10 +42,52 @@ pub enum ClientMsg {
     /// Host only: start now; seats nobody has taken are filled with AI players.
     StartGame,
     LeaveRoom,
-    Roll,
+    /// `rev` is that of the `State` the player was looking at; the server
+    /// rejects the request if the game has moved on.
+    Roll {
+        #[serde(default)]
+        rev: Option<u64>,
+    },
     Play {
         token: usize,
+        #[serde(default)]
+        rev: Option<u64>,
     },
+}
+
+/// What became of the room named in `Hello`, or the seat found for this client.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum Resumed {
+    /// Back in a game; its `State` follows.
+    Game,
+    /// Back in a waiting room; its `Room` follows.
+    Lobby,
+    /// The game ended while the client was away.
+    Finished { winner: String },
+    /// Nobody came back in time.
+    Expired,
+    /// The player had left that game.
+    Left,
+    /// The server knows nothing of it, for instance after a restart.
+    NotFound,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCode {
+    AlreadyInRoom,
+    BadPlayerCount,
+    RoomGone,
+    GameStarted,
+    RoomFull,
+    NotHost,
+    NotStarted,
+    NotYourTurn,
+    /// The rules do not allow that move.
+    NotAllowed,
+    /// The game moved on before the request arrived.
+    Stale,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -68,6 +118,11 @@ pub struct RoomInfo {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMsg {
+    /// The answer to the first `Hello` of a connection.
+    Welcome {
+        protocol: u32,
+        resume: Option<Resumed>,
+    },
     /// Open rooms, pushed to everyone who is not in a room.
     Rooms {
         rooms: Vec<RoomInfo>,
@@ -90,6 +145,8 @@ pub enum ServerMsg {
         game: Game,
         events: Vec<Event>,
         turn_ms: Option<u32>,
+        /// Counts the steps of the game; see `ClientMsg::Roll`.
+        rev: u64,
     },
     /// Sent every few seconds to check that the connection is alive.
     Ping,
@@ -98,6 +155,9 @@ pub enum ServerMsg {
         reason: String,
     },
     Error {
+        code: ErrorCode,
         message: String,
     },
+    /// The server is shutting down; games in progress will be lost.
+    Restarting,
 }

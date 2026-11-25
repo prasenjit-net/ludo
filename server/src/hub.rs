@@ -5,11 +5,11 @@
 use ludo_core::{
     Event, Game, Phase, Player,
     board::animation_ms,
-    protocol::{LobbyPlayer, RoomInfo, ServerMsg},
+    protocol::{ErrorCode, LobbyPlayer, PROTOCOL, Resumed, RoomInfo, ServerMsg},
 };
 use rand::Rng;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -52,6 +52,25 @@ const BOT_DELAY: Duration = Duration::from_millis(400);
 /// A player who has just come back gets at least this long to act (or the whole
 /// turn time, if that is shorter).
 const MIN_RETURN: Duration = Duration::from_secs(3);
+
+/// How many closed games are remembered, to tell late returners what happened.
+const REMEMBERED: usize = 256;
+
+/// Who a client says it is, on connecting.
+pub struct Hello {
+    pub client_id: String,
+    pub name: String,
+    pub color: Player,
+    /// The room it believes it is in.
+    pub room: Option<u32>,
+}
+
+/// A game that has been deleted.
+struct Ended {
+    room: u32,
+    clients: Vec<String>,
+    outcome: Resumed,
+}
 
 /// Client ids give access to a seat, so logs only show the start of one.
 fn short(client_id: &str) -> String {
@@ -123,6 +142,8 @@ struct Room {
     autopilot: bool,
     /// Since when no person has been connected to this game (it is paused).
     empty_since: Option<Instant>,
+    /// Counts the steps of the game, to recognise requests that are too late.
+    rev: u64,
 }
 
 impl Room {
@@ -181,6 +202,9 @@ impl Room {
     /// out. `events` are what just happened; the wait starts once they have
     /// finished animating. Nothing is scheduled while the game is over or paused.
     fn schedule(&mut self, timing: Timing, now: Instant, events: &[Event]) {
+        if !events.is_empty() {
+            self.rev += 1;
+        }
         let game = self.game.as_ref().filter(|g| g.phase() != Phase::Over);
         let Some(game) = game.filter(|_| self.empty_since.is_none()) else {
             self.deadline = None;
@@ -249,6 +273,24 @@ impl Room {
         }
     }
 
+    fn winner_name(&self) -> Option<String> {
+        let seat = self.game.as_ref()?.winner?;
+        Some(self.members[seat].name.clone())
+    }
+
+    fn ended(&self, id: u32, outcome: Resumed) -> Ended {
+        Ended {
+            room: id,
+            clients: self
+                .members
+                .iter()
+                .filter(|m| !m.bot)
+                .map(|m| m.client_id.clone())
+                .collect(),
+            outcome,
+        }
+    }
+
     fn color_free(&self, color: Player) -> bool {
         self.members.iter().all(|m| m.color != color)
     }
@@ -271,6 +313,7 @@ struct Inner {
     conns: HashMap<u64, Conn>,
     rooms: BTreeMap<u32, Room>,
     next_room: u32,
+    ended: VecDeque<Ended>,
 }
 
 #[derive(Clone)]
@@ -295,13 +338,41 @@ impl Inner {
         }
     }
 
-    fn error(&self, conn: u64, message: &str) {
+    fn error(&self, conn: u64, code: ErrorCode, message: &str) {
         self.send(
             conn,
             ServerMsg::Error {
+                code,
                 message: message.to_string(),
             },
         );
+    }
+
+    fn remember(&mut self, ended: Ended) {
+        if self.ended.len() == REMEMBERED {
+            self.ended.pop_front();
+        }
+        self.ended.push_back(ended);
+    }
+
+    /// Why this client has no seat in the room it thought it was in.
+    fn fate(&self, id: u32, client_id: &str) -> Resumed {
+        if let Some(room) = self.rooms.get(&id)
+            && let Some(game) = &room.game
+            && let Some(seat) = room.members.iter().position(|m| m.client_id == client_id)
+        {
+            if game.left[seat] {
+                return Resumed::Left;
+            }
+            if let Some(winner) = room.winner_name() {
+                return Resumed::Finished { winner };
+            }
+        }
+        self.ended
+            .iter()
+            .rev()
+            .find(|e| e.room == id && e.clients.iter().any(|c| c == client_id))
+            .map_or(Resumed::NotFound, |e| e.outcome.clone())
     }
 
     /// Send the room browser to everyone who is not in a room.
@@ -353,6 +424,7 @@ impl Inner {
                     game: game.clone(),
                     events: events.clone(),
                     turn_ms,
+                    rev: room.rev,
                 },
                 None => ServerMsg::Room {
                     id,
@@ -424,6 +496,10 @@ impl Inner {
             info!(room = id, "nobody connected, game paused");
             room.pause(now);
         } else {
+            if let Some(winner) = room.winner_name() {
+                let ended = room.ended(id, Resumed::Finished { winner });
+                self.remember(ended);
+            }
             self.rooms.remove(&id);
         }
         true
@@ -434,6 +510,7 @@ impl Inner {
     fn expire(&mut self, timing: Timing, now: Instant) -> bool {
         let mut changed = false;
         let mut lobbies = Vec::new();
+        let mut ended = Vec::new();
         self.rooms.retain(|&id, room| {
             if room.game.is_some() {
                 let expired = room
@@ -441,6 +518,7 @@ impl Inner {
                     .is_some_and(|t| now.duration_since(t) >= timing.room_grace);
                 if expired {
                     info!(room = id, "nobody came back, room expired");
+                    ended.push(room.ended(id, Resumed::Expired));
                     changed = true;
                 }
                 return !expired;
@@ -462,6 +540,9 @@ impl Inner {
             }
             !room.members.is_empty()
         });
+        for game in ended {
+            self.remember(game);
+        }
         for id in lobbies {
             self.push_room(id, Vec::new(), now);
         }
@@ -481,15 +562,13 @@ impl Hub {
         self.inner.lock().unwrap()
     }
 
-    pub fn hello(
-        &self,
-        conn: u64,
-        tx: Tx,
-        client_id: String,
-        name: String,
-        color: Player,
-        now: Instant,
-    ) {
+    pub fn hello(&self, conn: u64, tx: Tx, hello: Hello, now: Instant) {
+        let Hello {
+            client_id,
+            name,
+            color,
+            room: claimed,
+        } = hello;
         let mut inner = self.lock();
         let name = clean(&name, 16, "Player");
         if let Some(c) = inner.conns.get_mut(&conn) {
@@ -523,6 +602,18 @@ impl Hub {
                 .is_none_or(|g| !g.left[seat] && !r.finished());
             open.then_some((id, seat))
         });
+        let resume = match found {
+            Some((id, _)) if inner.rooms[&id].game.is_some() => Some(Resumed::Game),
+            Some(_) => Some(Resumed::Lobby),
+            None => claimed.map(|id| inner.fate(id, &client_id)),
+        };
+        inner.send(
+            conn,
+            ServerMsg::Welcome {
+                protocol: PROTOCOL,
+                resume,
+            },
+        );
         let Some((id, seat)) = found else {
             info!(conn, client = %short(&client_id), "hello, no seat to restore");
             inner.push_rooms();
@@ -563,10 +654,14 @@ impl Hub {
             return;
         };
         if c.room.is_some() {
-            return inner.error(conn, "you are already in a room");
+            return inner.error(conn, ErrorCode::AlreadyInRoom, "you are already in a room");
         }
         if !(2..=4).contains(&players) {
-            return inner.error(conn, "a game needs 2 to 4 players");
+            return inner.error(
+                conn,
+                ErrorCode::BadPlayerCount,
+                "a game needs 2 to 4 players",
+            );
         }
         inner.next_room += 1;
         let id = inner.next_room;
@@ -582,6 +677,7 @@ impl Hub {
             latest: None,
             autopilot: false,
             empty_since: None,
+            rev: 0,
         };
         inner.rooms.insert(id, room);
         inner.conns.get_mut(&conn).unwrap().room = Some(id);
@@ -595,17 +691,21 @@ impl Hub {
             return;
         };
         if c.room.is_some() {
-            return inner.error(conn, "you are already in a room");
+            return inner.error(conn, ErrorCode::AlreadyInRoom, "you are already in a room");
         }
         let (client_id, name, pref) = (c.client_id.clone(), c.name.clone(), c.color);
         let Some(room) = inner.rooms.get_mut(&id) else {
-            return inner.error(conn, "that room no longer exists");
+            return inner.error(conn, ErrorCode::RoomGone, "that room no longer exists");
         };
         if room.game.is_some() {
-            return inner.error(conn, "that game has already started");
+            return inner.error(
+                conn,
+                ErrorCode::GameStarted,
+                "that game has already started",
+            );
         }
         if room.members.len() >= room.capacity {
-            return inner.error(conn, "that room is full");
+            return inner.error(conn, ErrorCode::RoomFull, "that room is full");
         }
         let color = room.assign_color(pref);
         room.members
@@ -649,7 +749,7 @@ impl Hub {
             return;
         }
         if room.members[room.host_index()].conn != Some(conn) {
-            return inner.error(conn, "only the host can start the game");
+            return inner.error(conn, ErrorCode::NotHost, "only the host can start the game");
         }
         inner.start_game(id, self.timing, now);
     }
@@ -668,10 +768,20 @@ impl Hub {
         inner.push_rooms();
     }
 
-    /// Run a game action for `conn`, checking it is that player's turn.
+    /// Tell everyone the server is about to stop.
+    pub fn announce_restart(&self) {
+        let inner = self.lock();
+        for c in inner.conns.values() {
+            let _ = c.tx.send(ServerMsg::Restarting);
+        }
+    }
+
+    /// Run a game action for `conn`, checking it is that player's turn and
+    /// that the request (made against step `rev`) is not out of date.
     pub fn act(
         &self,
         conn: u64,
+        rev: Option<u64>,
         now: Instant,
         action: impl FnOnce(&mut Game) -> Result<Vec<Event>, ludo_core::Error>,
     ) {
@@ -686,10 +796,13 @@ impl Hub {
             room.members.iter().position(|m| m.conn == Some(conn)),
             room.game.as_mut(),
         ) else {
-            return inner.error(conn, "the game has not started");
+            return inner.error(conn, ErrorCode::NotStarted, "the game has not started");
         };
+        if rev.is_some_and(|r| r != room.rev) {
+            return inner.error(conn, ErrorCode::Stale, "the game has moved on");
+        }
         if game.turn != seat {
-            return inner.error(conn, "it is not your turn");
+            return inner.error(conn, ErrorCode::NotYourTurn, "it is not your turn");
         }
         match action(game) {
             Ok(events) => {
@@ -700,7 +813,7 @@ impl Hub {
                 room.schedule(self.timing, now, &events);
                 inner.push_room(id, events, now);
             }
-            Err(e) => inner.error(conn, &e.to_string()),
+            Err(e) => inner.error(conn, ErrorCode::NotAllowed, &e.to_string()),
         }
     }
 

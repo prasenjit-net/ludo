@@ -50,6 +50,10 @@ docker run --rm -p 3000:3000 ludo
 
 The image is a single server binary (the game is embedded in it) on a distroless base, built for `linux/amd64`; see [Server settings](#server-settings) for the environment variables.
 
+## Updates and restarts
+
+The client and server compare protocol numbers (`PROTOCOL` in `ludo-core/src/protocol.rs`) on connecting, and an out-of-date page reloads itself; raise the number when changing messages incompatibly. On `SIGTERM` or Ctrl-C the server warns its clients before stopping.
+
 ## Testing unstable connections
 
 Open the game with `?chaos=1` (for example `http://127.0.0.1:3000/?chaos=1`) and it cuts its own connection every 20 to 60 seconds, so a whole game exercises reconnecting.

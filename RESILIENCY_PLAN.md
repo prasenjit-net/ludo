@@ -84,10 +84,10 @@ Ranked by impact.
 
 ## Phase 3: message format, version 2 (`ludo-core/src/protocol.rs`)
 
-1. **Reconnect outcome:** `Hello` carries a protocol version and the room id and `rev` the client last saw. The server answers with the outcome: back in your game, back in your waiting room, or not restored with a reason (game finished, room expired). The client shows the reason instead of landing silently in the room list.
-2. **Reject stale taps:** every room and game update carries `rev`, a number the server raises on every change. `Roll` and `Play` include the `rev` they were made against; the server rejects stale ones with an error code and the client waits for the current state.
+1. **Reconnect outcome:** `Hello` carries the room id the client believes it is in. The server answers with `Welcome`: its protocol version and the outcome (back in your game, back in your waiting room, or not restored with a reason: finished, expired, left, not found). The client shows the reason instead of landing silently in the room list.
+2. **Reject stale taps:** every game update carries `rev`, a number the server raises on every step of the game (not on presence changes, which should not invalidate a tap). `Roll` and `Play` include the `rev` they were made against; the server rejects stale ones with an error code and the client waits for the current state.
 3. **Error codes** in addition to the error text.
-4. **Version check:** if the protocol version doesn't match, the client reloads once to fetch the new game.
+4. **Version check:** if the server's protocol version in `Welcome` doesn't match, the client reloads once to fetch the new game.
 5. **Clean shutdown:** on SIGTERM the server tells clients it is restarting before exiting. Games are still lost on a restart, but players get a clear message instead of a hang.
 
 ## Testing (alongside every phase)
