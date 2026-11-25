@@ -189,8 +189,8 @@ fn token_targets(game: &Game) -> Vec<Vec<Vec2>> {
     let mut base = Vec::new();
     let mut groups: HashMap<(i32, i32), usize> = HashMap::new();
     for (seat, &player) in game.seats.iter().enumerate() {
-        for idx in 0..TOKENS {
-            let (c, r) = token_pos(player, idx, game.tokens[seat][idx]);
+        for (idx, &progress) in game.tokens[seat].iter().enumerate() {
+            let (c, r) = token_pos(player, idx, progress);
             let key = ((c * 100.0) as i32, (r * 100.0) as i32);
             *groups.entry(key).or_default() += 1;
             base.push((seat, idx, key, cell_pos(c, r)));
