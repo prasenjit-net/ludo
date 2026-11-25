@@ -14,15 +14,49 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::mpsc::UnboundedSender;
+use tracing::info;
 
 pub type Tx = UnboundedSender<ServerMsg>;
 
-/// A player who lets this many turns time out in a row is removed from the game.
-const MAX_TIMEOUTS: u8 = 3;
+/// How long the server waits for things.
+#[derive(Clone, Copy, Debug)]
+pub struct Timing {
+    /// Turn time of a player who is there and playing.
+    pub turn: Duration,
+    /// Wait before a bot plays the turn of an offline or idle player.
+    pub away_turn: Duration,
+    /// Timeouts in a row before a connected player counts as idle.
+    pub idle_timeouts: u8,
+    /// How long a game with nobody connected is kept, paused.
+    pub room_grace: Duration,
+    /// How long a disconnected player keeps their place in a waiting room.
+    pub lobby_grace: Duration,
+}
+
+impl Default for Timing {
+    fn default() -> Self {
+        Timing {
+            turn: Duration::from_secs(10),
+            away_turn: Duration::from_secs(15),
+            idle_timeouts: 3,
+            room_grace: Duration::from_secs(15 * 60),
+            lobby_grace: Duration::from_secs(60),
+        }
+    }
+}
 
 /// How long an AI player "thinks" before each roll and each move, on top of the
 /// time clients need to animate what just happened.
 const BOT_DELAY: Duration = Duration::from_millis(400);
+
+/// A player who has just come back gets at least this long to act (or the whole
+/// turn time, if that is shorter).
+const MIN_RETURN: Duration = Duration::from_secs(3);
+
+/// Client ids give access to a seat, so logs only show the start of one.
+fn short(client_id: &str) -> String {
+    client_id.chars().take(8).collect()
+}
 
 struct Conn {
     tx: Tx,
@@ -39,8 +73,38 @@ struct Member {
     name: String,
     color: Player,
     timeouts: u8,
+    /// Connected but not playing: turns are played for them until they act.
+    idle: bool,
+    /// When the connection dropped.
+    away_since: Option<Instant>,
     /// An AI player: never has a connection, never times out.
     bot: bool,
+}
+
+impl Member {
+    fn person(client_id: String, conn: u64, name: String, color: Player) -> Self {
+        Member {
+            client_id,
+            conn: Some(conn),
+            name,
+            color,
+            timeouts: 0,
+            idle: false,
+            away_since: None,
+            bot: false,
+        }
+    }
+
+    /// How long this player's turn lasts before the server steps in.
+    fn turn_wait(&self, timing: Timing) -> Duration {
+        if self.bot {
+            BOT_DELAY
+        } else if self.conn.is_none() || self.idle {
+            timing.away_turn
+        } else {
+            timing.turn
+        }
+    }
 }
 
 struct Room {
@@ -52,6 +116,13 @@ struct Room {
     host: String,
     game: Option<Game>,
     deadline: Option<Instant>,
+    /// Losing or regaining a connection never moves `deadline` far past this,
+    /// so a flapping connection cannot stall the game.
+    latest: Option<Instant>,
+    /// The server is playing the current turn for an offline or idle player.
+    autopilot: bool,
+    /// Since when no person has been connected to this game (it is paused).
+    empty_since: Option<Instant>,
 }
 
 impl Room {
@@ -97,23 +168,82 @@ impl Room {
                 name: format!("Bot {n}"),
                 color,
                 timeouts: 0,
+                idle: false,
+                away_since: None,
                 bot: true,
             });
         }
     }
 
-    /// When the current turn must be played automatically: soon for an AI
-    /// player, after the turn time for a person, never once the game is over.
-    /// `events` are what just happened; a bot waits for them to finish animating.
-    fn next_deadline(&self, turn_time: Duration, events: &[Event]) -> Option<Instant> {
-        let game = self.game.as_ref().filter(|g| g.phase() != Phase::Over)?;
-        let wait = Duration::from_millis(animation_ms(events))
-            + if self.members[game.turn].bot {
-                BOT_DELAY
-            } else {
-                turn_time
-            };
-        Some(Instant::now() + wait)
+    /// Set the time of the next automatic step: soon for an AI player or a turn
+    /// already being played for someone, otherwise when the player's wait runs
+    /// out. `events` are what just happened; the wait starts once they have
+    /// finished animating. Nothing is scheduled while the game is over or paused.
+    fn schedule(&mut self, timing: Timing, now: Instant, events: &[Event]) {
+        let game = self.game.as_ref().filter(|g| g.phase() != Phase::Over);
+        let Some(game) = game.filter(|_| self.empty_since.is_none()) else {
+            self.deadline = None;
+            self.latest = None;
+            self.autopilot = false;
+            return;
+        };
+        let start = now + Duration::from_millis(animation_ms(events));
+        let wait = if self.autopilot {
+            BOT_DELAY
+        } else {
+            self.members[game.turn].turn_wait(timing)
+        };
+        self.deadline = Some(start + wait);
+        self.latest = Some(start + timing.away_turn + timing.turn);
+    }
+
+    /// The player in `seat` dropped or came back: if it is their turn, change
+    /// how long is left of it.
+    fn presence_changed(&mut self, seat: usize, timing: Timing, now: Instant) {
+        if self.game.as_ref().is_none_or(|g| g.turn != seat) {
+            return;
+        }
+        let member = &self.members[seat];
+        if member.conn.is_some() {
+            self.autopilot = false;
+        } else if self.autopilot {
+            return;
+        }
+        if let (Some(deadline), Some(latest)) = (self.deadline.as_mut(), self.latest) {
+            let soonest = now + MIN_RETURN.min(timing.turn);
+            *deadline = (now + member.turn_wait(timing)).min(latest).max(soonest);
+        }
+    }
+
+    /// Stop the clock until somebody comes back.
+    fn pause(&mut self, now: Instant) {
+        self.empty_since = Some(now);
+        self.deadline = None;
+        self.latest = None;
+        self.autopilot = false;
+    }
+
+    /// Could somebody still come back to this game?
+    fn resumable(&self) -> bool {
+        self.game.as_ref().is_some_and(|g| {
+            g.phase() != Phase::Over
+                && self
+                    .members
+                    .iter()
+                    .enumerate()
+                    .any(|(seat, m)| !m.bot && !g.left[seat])
+        })
+    }
+
+    /// Hand the waiting room to someone else if the host is gone.
+    fn fix_host(&mut self) {
+        if self.members.iter().any(|m| m.client_id == self.host) {
+            return;
+        }
+        let next = self.members.iter().find(|m| m.conn.is_some());
+        if let Some(m) = next.or(self.members.first()) {
+            self.host = m.client_id.clone();
+        }
     }
 
     fn color_free(&self, color: Player) -> bool {
@@ -143,7 +273,7 @@ struct Inner {
 #[derive(Clone)]
 pub struct Hub {
     inner: Arc<Mutex<Inner>>,
-    turn_time: Duration,
+    timing: Timing,
 }
 
 fn clean(text: &str, max: usize, fallback: &str) -> String {
@@ -198,16 +328,18 @@ impl Inner {
     }
 
     /// Send a room's current view (waiting room or game) to its connected members.
-    fn push_room(&self, id: u32, events: Vec<Event>) {
+    fn push_room(&self, id: u32, events: Vec<Event>, now: Instant) {
         let Some(room) = self.rooms.get(&id) else {
             return;
         };
         let players = room.players();
-        let bot_turn = room.game.as_ref().is_some_and(|g| room.members[g.turn].bot);
+        // No countdown while the server is the one playing.
+        let automatic =
+            room.autopilot || room.game.as_ref().is_some_and(|g| room.members[g.turn].bot);
         let turn_ms = room
             .deadline
-            .filter(|_| !bot_turn)
-            .map(|d| d.saturating_duration_since(Instant::now()).as_millis() as u32);
+            .filter(|_| !automatic)
+            .map(|d| d.saturating_duration_since(now).as_millis() as u32);
         for (you, member) in room.members.iter().enumerate() {
             let Some(conn) = member.conn else { continue };
             let msg = match &room.game {
@@ -232,7 +364,7 @@ impl Inner {
         }
     }
 
-    fn start_game(&mut self, id: u32, turn_time: Duration) {
+    fn start_game(&mut self, id: u32, timing: Timing, now: Instant) {
         let Some(room) = self.rooms.get_mut(&id) else {
             return;
         };
@@ -240,16 +372,15 @@ impl Inner {
         // Seats follow board order so turns go clockwise.
         room.members.sort_by_key(|m| m.color.index());
         room.game = Some(Game::new(room.members.iter().map(|m| m.color).collect()));
-        room.deadline = room.next_deadline(turn_time, &[]);
-        self.push_room(id, Vec::new());
+        room.schedule(timing, now, &[]);
+        self.push_room(id, Vec::new(), now);
         self.push_rooms();
     }
 
-    /// Take a connection out of its room. An explicit `leave` removes the player
-    /// from a running game; a dropped connection only marks them away, so they
-    /// can come back (the turn timer plays for them meanwhile).
-    /// Returns true if the connection was in a room.
-    fn detach(&mut self, conn: u64, leave: bool) -> bool {
+    /// Take a connection out of its room. An explicit `leave` gives up the
+    /// seat; a dropped connection only marks the player away, so they can come
+    /// back. Returns true if the connection was in a room.
+    fn detach(&mut self, conn: u64, leave: bool, timing: Timing, now: Instant) -> bool {
         let Some(id) = self.conns.get_mut(&conn).and_then(|c| c.room.take()) else {
             return false;
         };
@@ -259,40 +390,87 @@ impl Inner {
         let Some(seat) = room.members.iter().position(|m| m.conn == Some(conn)) else {
             return true;
         };
-        match &mut room.game {
-            None => {
+        room.members[seat].conn = None;
+        room.members[seat].away_since = Some(now);
+        let Some(game) = room.game.as_mut() else {
+            if leave {
                 room.members.remove(seat);
-                if room.members.is_empty() {
-                    self.rooms.remove(&id);
-                } else {
-                    if room.members.iter().all(|m| m.client_id != room.host) {
-                        room.host = room.members[0].client_id.clone();
-                    }
-                    self.push_room(id, Vec::new());
-                }
             }
-            Some(game) => {
-                let events = if leave { game.leave(seat) } else { Vec::new() };
-                room.members[seat].conn = None;
-                if room.finished() {
-                    room.deadline = None;
-                }
-                if room.anyone_connected() {
-                    self.push_room(id, events);
-                } else {
-                    self.rooms.remove(&id);
-                }
+            if room.members.is_empty() {
+                self.rooms.remove(&id);
+            } else {
+                room.fix_host();
+                self.push_room(id, Vec::new(), now);
             }
+            return true;
+        };
+
+        let turn = game.turn;
+        let events = if leave { game.leave(seat) } else { Vec::new() };
+        let turn_passed = game.turn != turn || game.phase() == Phase::Over;
+        if turn_passed {
+            room.autopilot = false;
+            room.schedule(timing, now, &events);
+        }
+        if room.anyone_connected() {
+            if !leave {
+                room.presence_changed(seat, timing, now);
+            }
+            self.push_room(id, events, now);
+        } else if room.resumable() {
+            info!(room = id, "nobody connected, game paused");
+            room.pause(now);
+        } else {
+            self.rooms.remove(&id);
         }
         true
+    }
+
+    /// Delete games nobody came back to, and drop people who have been gone
+    /// from a waiting room too long. Returns true if anything changed.
+    fn expire(&mut self, timing: Timing, now: Instant) -> bool {
+        let mut changed = false;
+        let mut lobbies = Vec::new();
+        self.rooms.retain(|&id, room| {
+            if room.game.is_some() {
+                let expired = room
+                    .empty_since
+                    .is_some_and(|t| now.duration_since(t) >= timing.room_grace);
+                if expired {
+                    info!(room = id, "nobody came back, room expired");
+                    changed = true;
+                }
+                return !expired;
+            }
+            let before = room.members.len();
+            room.members.retain(|m| {
+                let gone = m.conn.is_none()
+                    && m.away_since
+                        .is_some_and(|t| now.duration_since(t) >= timing.lobby_grace);
+                if gone {
+                    info!(room = id, client = %short(&m.client_id), "removed from waiting room");
+                }
+                !gone
+            });
+            if room.members.len() != before {
+                changed = true;
+                room.fix_host();
+                lobbies.push(id);
+            }
+            !room.members.is_empty()
+        });
+        for id in lobbies {
+            self.push_room(id, Vec::new(), now);
+        }
+        changed
     }
 }
 
 impl Hub {
-    pub fn new(turn_time: Duration) -> Self {
+    pub fn new(timing: Timing) -> Self {
         Hub {
             inner: Arc::default(),
-            turn_time,
+            timing,
         }
     }
 
@@ -300,7 +478,15 @@ impl Hub {
         self.inner.lock().unwrap()
     }
 
-    pub fn hello(&self, conn: u64, tx: Tx, client_id: String, name: String, color: Player) {
+    pub fn hello(
+        &self,
+        conn: u64,
+        tx: Tx,
+        client_id: String,
+        name: String,
+        color: Player,
+        now: Instant,
+    ) {
         let mut inner = self.lock();
         let name = clean(&name, 16, "Player");
         if let Some(c) = inner.conns.get_mut(&conn) {
@@ -322,36 +508,53 @@ impl Hub {
             },
         );
 
-        // Reconnecting to a game in progress: take the seat back.
+        // Reconnecting: take the seat (or the place in a waiting room) back.
         let found = inner.rooms.iter().find_map(|(&id, r)| {
-            let seat = r.members.iter().position(|m| m.client_id == client_id)?;
-            let game = r.game.as_ref()?;
-            (!game.left[seat] && !r.finished()).then_some((id, seat))
+            let seat = r
+                .members
+                .iter()
+                .position(|m| !m.bot && m.client_id == client_id)?;
+            let open = r
+                .game
+                .as_ref()
+                .is_none_or(|g| !g.left[seat] && !r.finished());
+            open.then_some((id, seat))
         });
-        if let Some((id, seat)) = found {
-            let old = inner.rooms[&id].members[seat].conn;
-            if let Some(old) = old
-                && let Some(c) = inner.conns.get_mut(&old)
-            {
-                c.room = None; // a second tab took over
-                inner.send(
-                    old,
-                    ServerMsg::Removed {
-                        reason: "Opened in another tab".into(),
-                    },
-                );
-            }
-            let room = inner.rooms.get_mut(&id).unwrap();
-            room.members[seat].conn = Some(conn);
-            room.members[seat].timeouts = 0;
-            inner.conns.get_mut(&conn).unwrap().room = Some(id);
-            inner.push_room(id, Vec::new());
-        } else {
+        let Some((id, seat)) = found else {
+            info!(conn, client = %short(&client_id), "hello, no seat to restore");
             inner.push_rooms();
+            return;
+        };
+        info!(conn, client = %short(&client_id), room = id, seat, "seat restored");
+        let old = inner.rooms[&id].members[seat].conn;
+        if let Some(old) = old
+            && let Some(c) = inner.conns.get_mut(&old)
+        {
+            c.room = None; // a second tab took over
+            inner.send(
+                old,
+                ServerMsg::Removed {
+                    reason: "Opened in another tab".into(),
+                },
+            );
         }
+        let timing = self.timing;
+        let room = inner.rooms.get_mut(&id).unwrap();
+        let member = &mut room.members[seat];
+        member.conn = Some(conn);
+        member.timeouts = 0;
+        member.idle = false;
+        member.away_since = None;
+        if room.empty_since.take().is_some() && room.game.is_some() {
+            room.schedule(timing, now, &[]);
+        } else {
+            room.presence_changed(seat, timing, now);
+        }
+        inner.conns.get_mut(&conn).unwrap().room = Some(id);
+        inner.push_room(id, Vec::new(), now);
     }
 
-    pub fn create_room(&self, conn: u64, name: &str, players: u8) {
+    pub fn create_room(&self, conn: u64, name: &str, players: u8, now: Instant) {
         let mut inner = self.lock();
         let Some(c) = inner.conns.get(&conn) else {
             return;
@@ -365,14 +568,7 @@ impl Hub {
         inner.next_room += 1;
         let id = inner.next_room;
         let c = &inner.conns[&conn];
-        let member = Member {
-            client_id: c.client_id.clone(),
-            conn: Some(conn),
-            name: c.name.clone(),
-            color: c.color,
-            timeouts: 0,
-            bot: false,
-        };
+        let member = Member::person(c.client_id.clone(), conn, c.name.clone(), c.color);
         let room = Room {
             name: clean(name, 24, &format!("{}'s room", c.name)),
             capacity: players as usize,
@@ -380,14 +576,17 @@ impl Hub {
             members: vec![member],
             game: None,
             deadline: None,
+            latest: None,
+            autopilot: false,
+            empty_since: None,
         };
         inner.rooms.insert(id, room);
         inner.conns.get_mut(&conn).unwrap().room = Some(id);
-        inner.push_room(id, Vec::new());
+        inner.push_room(id, Vec::new(), now);
         inner.push_rooms();
     }
 
-    pub fn join_room(&self, conn: u64, id: u32) {
+    pub fn join_room(&self, conn: u64, id: u32, now: Instant) {
         let mut inner = self.lock();
         let Some(c) = inner.conns.get(&conn) else {
             return;
@@ -406,25 +605,19 @@ impl Hub {
             return inner.error(conn, "that room is full");
         }
         let color = room.assign_color(pref);
-        room.members.push(Member {
-            client_id,
-            conn: Some(conn),
-            name,
-            color,
-            timeouts: 0,
-            bot: false,
-        });
+        room.members
+            .push(Member::person(client_id, conn, name, color));
         let full = room.members.len() == room.capacity;
         inner.conns.get_mut(&conn).unwrap().room = Some(id);
         if full {
-            inner.start_game(id, self.turn_time);
+            inner.start_game(id, self.timing, now);
         } else {
-            inner.push_room(id, Vec::new());
+            inner.push_room(id, Vec::new(), now);
             inner.push_rooms();
         }
     }
 
-    pub fn set_color(&self, conn: u64, color: Player) {
+    pub fn set_color(&self, conn: u64, color: Player, now: Instant) {
         let mut inner = self.lock();
         let Some(id) = inner.conns.get(&conn).and_then(|c| c.room) else {
             return;
@@ -437,11 +630,11 @@ impl Hub {
         }
         if let Some(m) = room.members.iter_mut().find(|m| m.conn == Some(conn)) {
             m.color = color;
-            inner.push_room(id, Vec::new());
+            inner.push_room(id, Vec::new(), now);
         }
     }
 
-    pub fn start(&self, conn: u64) {
+    pub fn start(&self, conn: u64, now: Instant) {
         let mut inner = self.lock();
         let Some(id) = inner.conns.get(&conn).and_then(|c| c.room) else {
             return;
@@ -455,19 +648,19 @@ impl Hub {
         if room.members[room.host_index()].conn != Some(conn) {
             return inner.error(conn, "only the host can start the game");
         }
-        inner.start_game(id, self.turn_time);
+        inner.start_game(id, self.timing, now);
     }
 
-    pub fn leave(&self, conn: u64) {
+    pub fn leave(&self, conn: u64, now: Instant) {
         let mut inner = self.lock();
-        if inner.detach(conn, true) {
+        if inner.detach(conn, true, self.timing, now) {
             inner.push_rooms();
         }
     }
 
-    pub fn disconnect(&self, conn: u64) {
+    pub fn disconnect(&self, conn: u64, now: Instant) {
         let mut inner = self.lock();
-        inner.detach(conn, false);
+        inner.detach(conn, false, self.timing, now);
         inner.conns.remove(&conn);
         inner.push_rooms();
     }
@@ -476,6 +669,7 @@ impl Hub {
     pub fn act(
         &self,
         conn: u64,
+        now: Instant,
         action: impl FnOnce(&mut Game) -> Result<Vec<Event>, ludo_core::Error>,
     ) {
         let mut inner = self.lock();
@@ -496,25 +690,30 @@ impl Hub {
         }
         match action(game) {
             Ok(events) => {
+                // Acting takes the seat back from the autopilot.
                 room.members[seat].timeouts = 0;
-                room.deadline = room.next_deadline(self.turn_time, &events);
-                inner.push_room(id, events);
+                room.members[seat].idle = false;
+                room.autopilot = false;
+                room.schedule(self.timing, now, &events);
+                inner.push_room(id, events, now);
             }
             Err(e) => inner.error(conn, &e.to_string()),
         }
     }
 
-    /// Play the turn of anyone who has let their time run out. Called a few times a second.
-    pub fn tick(&self) {
+    /// Play the turn of anyone whose time has run out, and expire what has been
+    /// abandoned. Called a few times a second.
+    pub fn tick(&self, now: Instant) {
         let mut inner = self.lock();
-        let now = Instant::now();
+        let timing = self.timing;
+        let mut changed = inner.expire(timing, now);
         let due: Vec<u32> = inner
             .rooms
             .iter()
             .filter(|(_, r)| r.deadline.is_some_and(|d| d <= now))
             .map(|(&id, _)| id)
             .collect();
-        let any = !due.is_empty();
+        changed |= !due.is_empty();
         let mut rng = rand::rng();
         for id in due {
             let Some(room) = inner.rooms.get_mut(&id) else {
@@ -524,10 +723,12 @@ impl Hub {
                 continue;
             };
             let seat = game.turn;
+            let member = &mut room.members[seat];
             let mut events = Vec::new();
-            let mut kicked = None;
-            if room.members[seat].bot {
-                // One step per tick (roll, then move) so people can follow along.
+            if member.bot || member.idle || member.conn.is_none() {
+                // The server plays: one step per tick (roll, then move) so
+                // people can follow along.
+                room.autopilot = !member.bot;
                 if game.dice.is_none() {
                     events.extend(game.roll(rng.random_range(1..=6)).unwrap_or_default());
                 } else if let Some(token) = game.best_move() {
@@ -540,34 +741,23 @@ impl Hub {
                 if let Some(token) = game.auto_move() {
                     events.extend(game.play(token).unwrap_or_default());
                 }
-                let member = &mut room.members[seat];
-                member.timeouts += 1;
-                if member.timeouts >= MAX_TIMEOUTS && !room.finished() {
-                    events.extend(room.game.as_mut().unwrap().leave(seat));
-                    kicked = room.members[seat].conn.take();
+                member.timeouts = member.timeouts.saturating_add(1);
+                if member.timeouts >= timing.idle_timeouts {
+                    member.idle = true;
+                    info!(room = id, seat, client = %short(&member.client_id), "player is idle");
                 }
             }
-            room.deadline = room.next_deadline(self.turn_time, &events);
-            let alive = room.anyone_connected();
-            if let Some(conn) = kicked {
-                if let Some(c) = inner.conns.get_mut(&conn) {
-                    c.room = None;
-                }
-                inner.send(
-                    conn,
-                    ServerMsg::Removed {
-                        reason: "Removed for being inactive".into(),
-                    },
-                );
+            if game.turn != seat {
+                room.autopilot = false;
             }
-            if alive {
-                inner.push_room(id, events);
-            } else {
-                inner.rooms.remove(&id);
-            }
+            room.schedule(timing, now, &events);
+            inner.push_room(id, events, now);
         }
-        if any {
+        if changed {
             inner.push_rooms();
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

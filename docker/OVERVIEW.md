@@ -17,7 +17,8 @@ Open http://localhost:3000. The first visit asks for a name and a colour, which 
 - **Online rooms:** browse the live room list, join one, or create your own with a name and a 2 to 4 player limit. The host can start at any time, even alone, and empty seats are filled with AI players; the game starts by itself when the room is full.
 - **Same screen:** 2 to 4 players on one device, with no server needed.
 - **Fair play:** the server rolls the dice and validates every move.
-- **Turn timer:** if a player does nothing for 10 seconds, the server plays their turn. Players who leave are removed and the game goes on while at least 2 remain.
+- **Turn timer:** if a player does nothing for 10 seconds, the server plays their turn; after three in a row a bot plays for them until they act again.
+- **Dropped connections:** the seat is kept and a bot plays it after 15 seconds per turn, until the player reconnects. Players who choose to leave are removed and the game goes on while at least 2 remain.
 - **Phone-first:** portrait layout with large touch targets, and a side-by-side layout in landscape.
 
 ## Configuration
@@ -25,7 +26,13 @@ Open http://localhost:3000. The first visit asks for a name and a colour, which 
 | Variable | Default | Meaning |
 |---|---|---|
 | `LUDO_ADDR` | `0.0.0.0:3000` | Address and port the server listens on |
-| `LUDO_TURN_MS` | `10000` | Milliseconds before the server plays an idle player's turn |
+| `LUDO_TURN_MS` | `10000` | Milliseconds a player has for a turn |
+| `LUDO_AWAY_TURN_MS` | `15000` | Wait before a bot plays the turn of an offline or idle player |
+| `LUDO_IDLE_TIMEOUTS` | `3` | Timeouts in a row before a player counts as idle |
+| `LUDO_ROOM_GRACE_MS` | `900000` | How long a game with nobody connected is kept |
+| `LUDO_LOBBY_GRACE_MS` | `60000` | How long a dropped player keeps their place in a waiting room |
+| `LUDO_PING_MS` | `15000` | Heartbeat interval |
+| `LUDO_DEAD_MS` | `45000` | Silence after which a connection counts as dead |
 
 ```sh
 docker run -d --name ludo -p 8080:8080 \

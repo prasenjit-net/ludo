@@ -39,11 +39,20 @@ pub fn connect() -> Result<(), String> {
     let ws = WebSocket::new(&url).map_err(|_| format!("cannot open {url}"))?;
 
     let on_open = Closure::<dyn FnMut()>::new(|| push(NetEvent::Open));
-    let on_message = Closure::<dyn FnMut(MessageEvent)>::new(|e: MessageEvent| {
+    let reply = ws.clone();
+    let on_message = Closure::<dyn FnMut(MessageEvent)>::new(move |e: MessageEvent| {
         if let Some(text) = e.data().as_string()
             && let Ok(msg) = serde_json::from_str(&text)
         {
-            push(NetEvent::Msg(msg));
+            // Answer pings here: a hidden tab stops drawing frames, so the
+            // game loop cannot be relied on to do it.
+            if matches!(msg, ServerMsg::Ping) {
+                if let Ok(pong) = serde_json::to_string(&ClientMsg::Pong) {
+                    let _ = reply.send_with_str(&pong);
+                }
+            } else {
+                push(NetEvent::Msg(msg));
+            }
         }
     });
     let on_close = Closure::<dyn FnMut(CloseEvent)>::new(|_| push(NetEvent::Closed));

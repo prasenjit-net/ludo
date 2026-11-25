@@ -48,7 +48,21 @@ docker build -t ludo .                   # builds the game and the server inside
 docker run --rm -p 3000:3000 ludo
 ```
 
-The image is a single server binary (the game is embedded in it) on a distroless base, built for `linux/amd64`; set `LUDO_ADDR` to change the listen address and `LUDO_TURN_MS` to change the turn timer.
+The image is a single server binary (the game is embedded in it) on a distroless base, built for `linux/amd64`; see [Server settings](#server-settings) for the environment variables.
+
+## Server settings
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `LUDO_ADDR` | `127.0.0.1:3000` (`0.0.0.0:3000` in Docker) | Listen address |
+| `LUDO_TURN_MS` | `10000` | Turn time of a player who is playing |
+| `LUDO_AWAY_TURN_MS` | `15000` | Wait before a bot plays the turn of an offline or idle player |
+| `LUDO_IDLE_TIMEOUTS` | `3` | Timeouts in a row before a player counts as idle |
+| `LUDO_ROOM_GRACE_MS` | `900000` | How long a game with nobody connected is kept |
+| `LUDO_LOBBY_GRACE_MS` | `60000` | How long a dropped player keeps their place in a waiting room |
+| `LUDO_PING_MS` | `15000` | Heartbeat interval; behind Cloudflare keep it well under 100000 |
+| `LUDO_DEAD_MS` | `45000` | Silence after which a connection counts as dead; must be longer than `LUDO_PING_MS` |
+| `RUST_LOG` | `info` | Log filter |
 
 ## CI and releases
 
@@ -68,8 +82,9 @@ The image is a single server binary (the game is embedded in it) on a distroless
 - **Waiting room:** the host can start at any time, even alone: every empty seat is filled with an AI player (shown as a bot). The game also starts by itself when the room is full. You get your preferred colour if it is free, otherwise the first free one, and you can switch to a free colour while waiting.
 - **Same screen:** under the room list, start a 2, 3 or 4 player game on one device, no server needed.
 - **Playing:** tap **ROLL**, then tap one of the highlighted tokens. The server rolls the dice and validates every move.
-- **Turn timer:** if you do nothing for 10 seconds, the server plays your turn (it rolls, then makes a sensible move: capture, then reach home, then leave the yard, then advance). Three timeouts in a row remove you from the game.
-- **Leaving:** **Leave game** removes you and your tokens. Play goes on while at least 2 players remain; the last player left wins. If your connection drops, your seat is kept and played by the timer, and you get it back when you reconnect (same browser).
+- **Turn timer:** if you do nothing for 10 seconds, the server plays your turn (it rolls, then makes a sensible move: capture, then reach home, then leave the yard, then advance). After three timeouts in a row you count as idle: a bot plays your turns until you act again, for example by tapping **Roll**. Nobody is removed for being slow.
+- **Dropped connections:** your seat is kept for as long as the game lasts. While you are offline each of your turns waits 15 seconds, then a bot plays it. Reconnect from the same browser to take over again. If nobody at all is connected the game pauses, and it is deleted after 15 minutes. In a waiting room your place is kept for 60 seconds.
+- **Leaving:** **Leave game** removes you and your tokens. Play goes on while at least 2 players remain; the last player left wins.
 
 ## Rules implemented
 
@@ -82,7 +97,7 @@ The image is a single server binary (the game is embedded in it) on a distroless
 
 ## Known limitations
 
-- Reconnecting relies on the id saved in the browser, so it only works from the same browser. A room with no human connected is deleted, bots included.
+- Reconnecting relies on the id saved in the browser, so it only works from the same browser. Games live in the server's memory, so restarting the server ends them.
 - Typing was tested with a keyboard in headless Chrome; I could not check the on-screen keyboard on a physical phone.
 - The wasm bundle is about 15 MB (5.6 MB gzipped; the server gzips responses). Release builds use fat LTO and `opt-level = "z"` to keep it small, so they take a few minutes.
 - Touch and layout were tested in headless Chrome with device emulation, not on a physical phone.

@@ -329,6 +329,7 @@ impl Session {
             client_id: self.profile.client_id.clone(),
             name: self.profile.name.clone(),
             color: self.profile.color,
+            heartbeat: true,
         }
     }
 
@@ -468,6 +469,8 @@ impl Session {
                 }
                 self.apply_events(events);
             }
+            // Answered as it arrives, in `net`.
+            ServerMsg::Ping => {}
             ServerMsg::Removed { reason } => {
                 self.clear_game();
                 self.screen = Screen::Rooms;

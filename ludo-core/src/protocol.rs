@@ -12,7 +12,13 @@ pub enum ClientMsg {
         client_id: String,
         name: String,
         color: Player,
+        /// The client answers `Ping`, so the server may drop it when it goes
+        /// quiet. Clients from before heartbeats leave this out.
+        #[serde(default)]
+        heartbeat: bool,
     },
+    /// Answer to `ServerMsg::Ping`.
+    Pong,
     /// Open a room for `players` (2..=4) and take the first seat as host.
     CreateRoom {
         name: String,
@@ -82,7 +88,9 @@ pub enum ServerMsg {
         events: Vec<Event>,
         turn_ms: Option<u32>,
     },
-    /// You were removed from your room (e.g. for being inactive).
+    /// Sent every few seconds to check that the connection is alive.
+    Ping,
+    /// You were removed from your room (e.g. it was opened in another tab).
     Removed {
         reason: String,
     },
