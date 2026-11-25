@@ -113,8 +113,7 @@ const auto = await p1.next((m) => m.type === "state" && m.events.some((e) => e.R
 check(auto.events.some((e) => e.Rolled), "server auto-rolls when a player is idle");
 
 // nobody ever acts: bots play on for them and nobody is thrown out
-const idleFrom = Date.now();
-while (Date.now() - idleFrom < 6000) await sleep(200);
+await sleep(6000);
 const idleState = p1.last("state");
 check(!p1.last("removed") && !p3.last("removed"), "idle players are not removed");
 check(idleState.game.left.join() === "false,true,false", "idle players keep their seats");
@@ -197,19 +196,21 @@ const net1 = await proxy(), net2 = await proxy();
 
 // a long absence does not cost the seat
 {
-  const { a, b, seatB } = await duel("Drop", URL, net1.url);
+  const { a, seatB } = await duel("Drop", URL, net1.url);
   net1.cut();
   await a.next((m) => m.type === "state" && !m.players[seatB].connected);
-  let played = 0;
-  while (played < 5) {
+  // keep A's turns moving until B's seat has been played five times
+  const playOn = async (played) => {
+    if (played >= 5) return;
     const m = await a.next((m) => m.type === "state", 8000);
-    played += m.events.filter((e) => e.Rolled?.seat === seatB).length;
     if (m.game.turn === m.you && m.game.dice == null && m.turn_ms != null) a.send({ type: "roll" });
     else if (m.game.turn === m.you && m.game.dice != null) {
       // any token will do; try them until one is legal
       for (let token = 0; token < 4; token++) a.send({ type: "play", token });
     }
-  }
+    return playOn(played + m.events.filter((e) => e.Rolled?.seat === seatB).length);
+  };
+  await playOn(0);
   const again = await client("DropB", "Yellow", "Drop-b", net1.url);
   const st = await again.next(is("state"));
   check(st.you === seatB && !st.game.left[seatB], "back after 5 or more missed turns, same seat");
@@ -245,7 +246,7 @@ const net1 = await proxy(), net2 = await proxy();
 
 // both players drop: the game waits, then carries on
 {
-  const { a, seatA } = await duel("Both", net1.url, net2.url);
+  const { seatA } = await duel("Both", net1.url, net2.url);
   net1.cut(); net2.cut();
   await sleep(1000);
   const watcher2 = await client("W2", "Blue");
