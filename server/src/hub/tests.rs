@@ -140,33 +140,50 @@ fn dropping_on_your_turn_gives_the_longer_wait_and_returning_restores_it() {
     assert_eq!(w.wait_left(), TIMING.turn);
 }
 
-#[test]
-fn a_flapping_connection_cannot_hold_up_the_turn() {
+/// Drop and restore the current player every `half_secs` until the server plays.
+/// Returns how long that took.
+fn flap_until_played(half_millis: u64) -> Duration {
     let mut w = World::new();
     w.duel();
-    let turn = w.turn();
     let (client, mut conn) = w
         .room(|r| {
-            let m = &r.members[turn];
+            let m = &r.members[r.game.as_ref().unwrap().turn];
             (m.client_id.clone(), m.conn.unwrap())
         })
         .unwrap();
+    // Any step changes the game; whose turn it is next depends on the dice.
+    let before = w.room(|r| r.game.clone()).unwrap();
     let start = w.now;
-    for next in 10..40 {
-        w.hub.disconnect(conn, w.now);
-        w.run(4);
-        w.connect(next, &client);
-        conn = next;
-        if w.turn() != turn {
-            break;
+    let mut next = 10;
+    let mut online = true;
+    while w.room(|r| r.game.clone()).unwrap() == before && w.now - start < TIMING.room_grace {
+        if online {
+            w.hub.disconnect(conn, w.now);
+        } else {
+            next += 1;
+            conn = next;
+            w.connect(conn, &client);
         }
-        w.run(4);
-        if w.turn() != turn {
-            break;
+        online = !online;
+        for _ in 0..half_millis / 250 {
+            w.now += Duration::from_millis(250);
+            w.hub.tick(w.now);
         }
     }
-    assert_ne!(w.turn(), turn);
-    assert!(w.now - start < Duration::from_secs(45));
+    w.now - start
+}
+
+#[test]
+fn a_flapping_connection_cannot_hold_up_the_turn() {
+    let limit = TIMING.away_turn + TIMING.turn + MIN_RETURN;
+    for half_millis in [500, 2_000, 4_000, 9_000] {
+        let took = flap_until_played(half_millis);
+        // Plus one flap, since the loop only looks between them.
+        assert!(
+            took <= limit + Duration::from_millis(half_millis),
+            "flapping every {half_millis} ms held the turn for {took:?}"
+        );
+    }
 }
 
 #[test]
