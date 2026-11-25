@@ -21,7 +21,7 @@ async function client(name, color, id = name + Math.random(), url = URL, room = 
     // wait for a message matching pred (consumes everything up to and including it)
     next: (pred, ms = 3000) => new Promise((res, rej) => {
       const t = setTimeout(() => rej(new Error("timeout waiting on " + name + " " + pred)), ms);
-      const check = () => { const i = msgs.findIndex(pred); if (i >= 0) { clearTimeout(t); waiter = null; res(msgs.splice(0, i + 1).at(-1)); } else waiter = check; };
+      const check = () => { const i = msgs.findIndex((m) => pred(m)); if (i >= 0) { clearTimeout(t); waiter = null; res(msgs.splice(0, i + 1).at(-1)); } else waiter = check; };
       check();
     }),
     last: (type) => msgs.filter((m) => m.type === type).at(-1),

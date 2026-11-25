@@ -8,7 +8,7 @@ ARG TRUNK_VERSION=0.22.1
 
 RUN rustup target add wasm32-unknown-unknown
 # trunk publishes Linux binaries for x86_64 and aarch64; `uname -m` uses the same names.
-RUN curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-$(uname -m)-unknown-linux-gnu.tar.gz" \
+RUN curl --proto '=https' --tlsv1.2 -fsSL "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-$(uname -m)-unknown-linux-gnu.tar.gz" \
     | tar -xz -C /usr/local/bin
 
 WORKDIR /app
@@ -22,7 +22,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/target \
-    cargo build --release -p server \
+    cargo build --release --locked -p server \
  && cp target/release/server /ludo-server
 
 # ---- runtime: one static-ish binary, no shell ----------------------------------
