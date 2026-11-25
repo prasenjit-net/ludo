@@ -7,6 +7,7 @@
 //! to the owner's start cell, `51..=55` = home column, `56` = home.
 
 pub mod board;
+pub mod link;
 pub mod protocol;
 
 use serde::{Deserialize, Serialize};

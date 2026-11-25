@@ -12,13 +12,20 @@ use crate::{
 use bevy::prelude::Resource;
 use ludo_core::{
     Event, Game, Phase, Player,
-    protocol::{ClientMsg, LobbyPlayer, RoomInfo, ServerMsg},
+    protocol::{ClientMsg, ErrorCode, LobbyPlayer, PROTOCOL, Resumed, RoomInfo, ServerMsg},
 };
 
 pub const ROOMS_PER_PAGE: usize = 3;
 pub const NAME_MAX: usize = 16;
 pub const ROOM_NAME_MAX: usize = 24;
-const RETRY_SECS: f32 = 3.0;
+/// Why we are waiting for the server to give us our seat back.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Resume {
+    /// The connection dropped while we were in a room.
+    Reconnecting,
+    /// The page was loaded again while we were in a room.
+    Rejoining,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Screen {
@@ -76,8 +83,18 @@ pub struct Session {
     pub create_players: u8,
 
     pub connected: bool,
-    /// Seconds until the next automatic reconnect attempt.
-    pub reconnect_in: Option<f32>,
+    /// The connection has failed and is being retried.
+    pub lost: bool,
+    /// Set until the server says whether we still have our seat.
+    pub resume: Option<Resume>,
+    /// The server said it was shutting down.
+    pub restarting: bool,
+    /// `rev` of the game on screen, sent back with our requests.
+    game_rev: u64,
+    /// We asked to leave and the server has not confirmed it yet.
+    leaving: bool,
+    /// The room remembered in local storage.
+    saved_room: Option<u32>,
     pub rooms: Vec<RoomInfo>,
     pub page: usize,
 
@@ -120,6 +137,7 @@ impl Session {
         let stored = store::load();
         let has_profile = stored.is_some();
         let profile = stored.unwrap_or_else(store::random_profile);
+        let saved_room = store::load_room().filter(|_| has_profile);
         Session {
             screen: if has_profile {
                 Screen::Rooms
@@ -134,7 +152,12 @@ impl Session {
             room_draft: String::new(),
             create_players: 4,
             connected: false,
-            reconnect_in: None,
+            lost: false,
+            resume: saved_room.map(|_| Resume::Rejoining),
+            restarting: false,
+            game_rev: 0,
+            leaving: false,
+            saved_room,
             rooms: Vec::new(),
             page: 0,
             in_room: false,
@@ -167,7 +190,7 @@ impl Session {
                 && !self.animating
                 && !self.dice_busy
                 && !self.rolling
-                && (!self.in_room || self.you == Some(g.turn))
+                && (!self.in_room || (self.resume.is_none() && self.you == Some(g.turn)))
         })
     }
 
@@ -249,6 +272,7 @@ impl Session {
             Action::SetPlayers(n) => self.create_players = n.clamp(2, 4),
             Action::CreateRoom => {
                 if self.connected {
+                    self.leaving = false;
                     let name = trimmed(&self.room_draft, ROOM_NAME_MAX);
                     net::send(&ClientMsg::CreateRoom {
                         name,
@@ -259,8 +283,9 @@ impl Session {
                 }
             }
             Action::JoinRow(row) => {
-                if let Some(room) = self.row(row) {
-                    net::send(&ClientMsg::JoinRoom { id: room.id });
+                if let Some(id) = self.row(row).map(|r| r.id) {
+                    self.leaving = false;
+                    net::send(&ClientMsg::JoinRoom { id });
                 }
             }
             Action::PageNext => self.page = (self.page + 1).min(self.page_count() - 1),
@@ -268,6 +293,7 @@ impl Session {
             Action::Start => net::send(&ClientMsg::StartGame),
             Action::Local(n) => {
                 self.clear_game();
+                self.resume = None;
                 let seats = Player::for_count(n as usize);
                 self.players = seats
                     .iter()
@@ -275,6 +301,7 @@ impl Session {
                         name: p.name().into(),
                         player: p,
                         connected: true,
+                        idle: false,
                         bot: false,
                     })
                     .collect();
@@ -291,8 +318,12 @@ impl Session {
             }
             Action::Leave => {
                 if self.in_room {
+                    // Repeated after a reconnect until the server confirms.
+                    self.leaving = true;
                     net::send(&ClientMsg::LeaveRoom);
                 }
+                self.resume = None;
+                self.remember(None);
                 self.clear_game();
                 self.error = None;
                 self.screen = Screen::Rooms;
@@ -329,15 +360,20 @@ impl Session {
             client_id: self.profile.client_id.clone(),
             name: self.profile.name.clone(),
             color: self.profile.color,
+            heartbeat: true,
+            room: self.saved_room,
         }
     }
 
-    /// (Re)open the connection to the server.
+    /// Connect to the server, or retry now.
     pub fn connect(&mut self) {
-        self.reconnect_in = None;
-        if let Err(e) = net::connect() {
-            self.error = Some(e);
-            self.reconnect_in = Some(RETRY_SECS);
+        net::start();
+    }
+
+    fn remember(&mut self, room: Option<u32>) {
+        if self.saved_room != room {
+            self.saved_room = room;
+            store::save_room(room);
         }
     }
 
@@ -377,7 +413,9 @@ impl Session {
         }
         if self.in_room {
             self.rolling = true;
-            net::send(&ClientMsg::Roll);
+            net::send(&ClientMsg::Roll {
+                rev: Some(self.game_rev),
+            });
         } else if let Some(game) = &mut self.game
             && let Ok(events) = game.roll(random_die())
         {
@@ -390,7 +428,10 @@ impl Session {
             return;
         }
         if self.in_room {
-            net::send(&ClientMsg::Play { token });
+            net::send(&ClientMsg::Play {
+                token,
+                rev: Some(self.game_rev),
+            });
         } else if let Some(game) = &mut self.game
             && let Ok(events) = game.play(token)
         {
@@ -404,38 +445,61 @@ impl Session {
         match ev {
             NetEvent::Open => {
                 self.connected = true;
+                self.lost = false;
                 self.error = None;
-                self.reconnect_in = None;
                 net::send(&self.hello());
-            }
-            NetEvent::Closed => {
-                self.connected = false;
-                self.reconnect_in = Some(RETRY_SECS);
-                self.rooms.clear();
-                if self.in_room {
-                    self.clear_game();
-                    self.screen = Screen::Rooms;
-                    self.error = Some("Connection lost. Reconnecting...".into());
+                if self.leaving {
+                    net::send(&ClientMsg::LeaveRoom);
                 }
             }
+            NetEvent::Closed => self.disconnected(),
             NetEvent::Msg(msg) => self.handle_msg(msg),
+        }
+    }
+
+    /// Keep what is on screen and wait to be given the seat back.
+    fn disconnected(&mut self) {
+        self.connected = false;
+        self.lost = true;
+        self.rooms.clear();
+        self.rolling = false;
+        self.turn_secs = None;
+        self.turn_rev += 1;
+        if !self.in_room {
+            return;
+        }
+        if self.game.as_ref().is_some_and(|g| g.phase() == Phase::Over) {
+            // Nothing to return to; leave the result on screen.
+            self.in_room = false;
+        } else {
+            self.resume = Some(Resume::Reconnecting);
         }
     }
 
     fn handle_msg(&mut self, msg: ServerMsg) {
         match msg {
+            ServerMsg::Welcome { protocol, resume } => self.welcomed(protocol, resume),
+            ServerMsg::Restarting => self.restarting = true,
             ServerMsg::Rooms { rooms } => {
+                self.leaving = false;
+                // Normally `Welcome` has already said so; a room list instead
+                // of a snapshot means our seat is gone all the same.
+                self.seat_lost("Your game is no longer available".into());
                 self.rooms = rooms;
                 self.page = self.page.min(self.page_count() - 1);
             }
+            // Sent before the server saw us leave.
+            ServerMsg::Room { .. } | ServerMsg::State { .. } if self.leaving => {}
             ServerMsg::Room {
+                id,
                 name,
                 you,
                 host,
                 capacity,
                 players,
-                ..
             } => {
+                self.resume = None;
+                self.remember(Some(id));
                 self.in_room = true;
                 self.room = Some(RoomView {
                     name,
@@ -448,13 +512,17 @@ impl Session {
                 self.screen = Screen::Room;
             }
             ServerMsg::State {
+                id,
                 you,
                 players,
                 game,
                 events,
                 turn_ms,
-                ..
+                rev,
             } => {
+                self.game_rev = rev;
+                self.resume = None;
+                self.remember((game.phase() != Phase::Over).then_some(id));
                 self.in_room = true;
                 self.you = Some(you);
                 self.players = players;
@@ -468,16 +536,56 @@ impl Session {
                 }
                 self.apply_events(events);
             }
+            // Answered as it arrives, in `net`.
+            ServerMsg::Ping => {}
             ServerMsg::Removed { reason } => {
+                self.resume = None;
+                self.leaving = false;
+                self.remember(None);
                 self.clear_game();
                 self.screen = Screen::Rooms;
                 self.error = Some(reason);
             }
-            ServerMsg::Error { message } => {
+            ServerMsg::Error { code, message } => {
                 self.rolling = false;
-                self.error = Some(message);
+                // A late tap needs no complaint; the new state is on its way.
+                if code != ErrorCode::Stale {
+                    self.error = Some(message);
+                }
             }
         }
+    }
+
+    fn welcomed(&mut self, protocol: u32, resume: Option<Resumed>) {
+        // The server has been updated since this page was loaded.
+        if protocol != PROTOCOL && !store::reload_for(protocol) {
+            self.error = Some("Reload the page to update the game".into());
+        }
+        let restarted = std::mem::take(&mut self.restarting);
+        let why = match resume {
+            None | Some(Resumed::Game | Resumed::Lobby) => return,
+            Some(Resumed::Finished { winner }) => format!("That game is over: {winner} won"),
+            Some(Resumed::Expired) => "Your game was closed: nobody came back in time".into(),
+            Some(Resumed::Left) => "You left that game".into(),
+            Some(Resumed::NotFound) if restarted => {
+                "The server restarted and your game was lost".into()
+            }
+            Some(Resumed::NotFound) => "Your game is no longer available".into(),
+        };
+        self.seat_lost(why);
+    }
+
+    /// If we were waiting for a seat back, give up on it and say why.
+    fn seat_lost(&mut self, why: String) {
+        if self.resume.take().is_none() {
+            return;
+        }
+        if self.in_room {
+            self.clear_game();
+            self.screen = Screen::Rooms;
+        }
+        self.remember(None);
+        self.error = Some(why);
     }
 
     fn apply_events(&mut self, events: Vec<Event>) {

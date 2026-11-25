@@ -163,10 +163,9 @@ fn setup_assets(
     });
 }
 
-/// Connect on start (once there is a profile), feed server messages into the
-/// session and retry dropped connections. The session is only marked changed
-/// when something actually happens.
-fn pump(mut session: ResMut<Session>, time: Res<Time>, mut booted: Local<bool>) {
+/// Connect on start (once there is a profile) and feed server messages into the
+/// session. The session is only marked changed when something actually happens.
+fn pump(mut session: ResMut<Session>, mut booted: Local<bool>) {
     if !*booted {
         *booted = true;
         if session.has_profile {
@@ -176,12 +175,6 @@ fn pump(mut session: ResMut<Session>, time: Res<Time>, mut booted: Local<bool>) 
     for ev in net::poll() {
         session.handle_net(ev);
     }
-    if let Some(left) = session.bypass_change_detection().reconnect_in.as_mut() {
-        *left -= time.delta_secs();
-        if *left <= 0.0 {
-            session.connect();
-        }
-    }
 }
 
 /// World positions for every token, spreading tokens that share a cell.
@@ -189,8 +182,8 @@ fn token_targets(game: &Game) -> Vec<Vec<Vec2>> {
     let mut base = Vec::new();
     let mut groups: HashMap<(i32, i32), usize> = HashMap::new();
     for (seat, &player) in game.seats.iter().enumerate() {
-        for idx in 0..TOKENS {
-            let (c, r) = token_pos(player, idx, game.tokens[seat][idx]);
+        for (idx, &progress) in game.tokens[seat].iter().enumerate() {
+            let (c, r) = token_pos(player, idx, progress);
             let key = ((c * 100.0) as i32, (r * 100.0) as i32);
             *groups.entry(key).or_default() += 1;
             base.push((seat, idx, key, cell_pos(c, r)));
