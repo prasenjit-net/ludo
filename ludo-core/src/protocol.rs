@@ -45,6 +45,9 @@ pub struct LobbyPlayer {
     pub name: String,
     pub player: Player,
     pub connected: bool,
+    /// Connected but not playing; a bot takes their turns until they act.
+    #[serde(default)]
+    pub idle: bool,
     /// Played by the server, not by a person.
     #[serde(default)]
     pub bot: bool,

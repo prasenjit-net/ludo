@@ -113,11 +113,10 @@ const auto = await p1.next((m) => m.type === "state" && m.events.some((e) => e.R
 check(auto.events.some((e) => e.Rolled), "server auto-rolls when a player is idle");
 
 // nobody ever acts: bots play on for them and nobody is thrown out
-const idleFrom = Date.now();
-while (Date.now() - idleFrom < 6000) await sleep(200);
-const idleState = p1.last("state");
+const idleState = await p1.next((m) => m.type === "state" && m.players[0].idle && m.players[2].idle, 30000);
 check(!p1.last("removed") && !p3.last("removed"), "idle players are not removed");
 check(idleState.game.left.join() === "false,true,false", "idle players keep their seats");
+check(true, "and are flagged as idle");
 
 // ...and an idle player takes the seat back just by acting
 const mine = (m) => m.type === "state" && m.game.turn === m.you && m.game.dice == null && m.turn_ms != null && m.game.winner == null;

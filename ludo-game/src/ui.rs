@@ -4,7 +4,7 @@
 
 use crate::{
     board::{EXTENT, player_color},
-    session::{Action, Screen, Session},
+    session::{Action, Resume, Screen, Session},
 };
 use bevy::{
     camera::ScalingMode,
@@ -77,6 +77,8 @@ struct BoardArea;
 enum Field {
     Error,
     ConnLine,
+    /// The banner shown while getting a seat back.
+    Resume,
     Empty,
     Page,
     ProfileName,
@@ -149,6 +151,10 @@ struct StartButton;
 /// Shown only while offline.
 #[derive(Component)]
 struct RetryBar;
+
+/// Covers the top of any screen while we wait for our seat back.
+#[derive(Component)]
+struct ResumeBar;
 
 /// Shown only when there is a profile to go back to.
 #[derive(Component)]
@@ -607,6 +613,35 @@ fn spawn_ui(mut commands: Commands) {
     ));
 
     commands.spawn((
+        ResumeBar,
+        Node {
+            position_type: PositionType::Absolute,
+            top: vmin(1.5),
+            width: percent(100),
+            justify_content: JustifyContent::Center,
+            display: Display::None,
+            ..default()
+        },
+        GlobalZIndex(20),
+        children![(
+            Node {
+                align_items: AlignItems::Center,
+                column_gap: vmin(3.0),
+                padding: UiRect::axes(vmin(4.0), vmin(1.5)),
+                border: UiRect::all(vmin(0.5)),
+                border_radius: BorderRadius::all(vmin(3.0)),
+                ..default()
+            },
+            BackgroundColor(PANEL),
+            BorderColor::all(ACCENT),
+            children![
+                (Field::Resume, label("", 4.0, TEXT)),
+                button_w("Retry now", Action::Retry, false, 7.0, Some(24.0)),
+            ],
+        )],
+    ));
+
+    commands.spawn((
         Banner,
         Node {
             position_type: PositionType::Absolute,
@@ -754,10 +789,15 @@ fn sync_fields(
     for (field, mut text) in &mut fields {
         let value = match field {
             Field::Error => session.error.clone().unwrap_or_default(),
-            Field::ConnLine => match (session.connected, session.reconnect_in) {
+            Field::ConnLine => match (session.connected, session.lost) {
                 (true, _) => String::new(),
-                (false, Some(_)) => "Offline - trying to reconnect...".into(),
-                (false, None) => "Connecting...".into(),
+                (false, true) => "Offline - trying to reconnect...".into(),
+                (false, false) => "Connecting...".into(),
+            },
+            Field::Resume => match session.resume {
+                Some(Resume::Reconnecting) => "Reconnecting...".into(),
+                Some(Resume::Rejoining) => "Rejoining your game...".into(),
+                None => String::new(),
             },
             Field::Empty => match (session.connected, session.rooms.is_empty()) {
                 (true, true) => "No open rooms yet. Create one!".into(),
@@ -873,6 +913,8 @@ fn sync_slots(
                 name.push_str(" (left)");
             } else if !p.connected {
                 name.push_str(" (away)");
+            } else if p.idle {
+                name.push_str(" (idle)");
             }
         }
         for child in children {
@@ -960,6 +1002,7 @@ fn sync_controls(
         Query<&mut Node, With<RetryBar>>,
         Query<&mut Node, With<BackBar>>,
         Query<&mut Node, With<StartButton>>,
+        Query<&mut Node, With<ResumeBar>>,
     )>,
     mut choices: Query<(&Choice, &mut Tint)>,
 ) {
@@ -988,13 +1031,20 @@ fn sync_controls(
             Display::None
         };
     }
+    for mut n in &mut nodes.p3() {
+        n.display = if session.resume.is_some() {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
     for (_, children) in &start {
         for child in children {
             if let Ok(disabled) = start_buttons.get(*child) {
                 set_disabled(
                     &mut commands,
                     [(*child, disabled)],
-                    session.players.is_empty(),
+                    session.players.is_empty() || session.resume.is_some(),
                 );
             }
         }
@@ -1031,7 +1081,7 @@ fn countdown(
     time: Res<Time>,
     session: Res<Session>,
     mut fields: Query<(&Field, &mut Text)>,
-    mut state: Local<(u32, Option<f32>, Option<i32>)>,
+    mut state: Local<(u32, Option<f32>, String)>,
 ) {
     if state.0 != session.turn_rev {
         state.0 = session.turn_rev;
@@ -1050,13 +1100,28 @@ fn countdown(
     } else {
         None
     };
-    if secs != state.2 {
-        state.2 = secs;
+    // Say who will act when the time runs out.
+    let line = secs.map_or(String::new(), |s| {
+        let waiting = session
+            .game
+            .as_ref()
+            .and_then(|g| Some((g.turn, session.players.get(g.turn)?)))
+            .filter(|(_, p)| p.idle || !p.connected);
+        match waiting {
+            Some((seat, _)) if session.you == Some(seat) => {
+                format!("Bot plays in {s}s - act to take over")
+            }
+            Some(_) => format!("Bot plays in {s}s"),
+            None => format!("Auto-play in {s}s"),
+        }
+    });
+    if line != state.2 {
         for (field, mut text) in &mut fields {
             if matches!(field, Field::Timer) {
-                **text = secs.map_or(String::new(), |s| format!("Auto-play in {s}s"));
+                **text = line.clone();
             }
         }
+        state.2 = line;
     }
 }
 

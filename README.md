@@ -6,7 +6,7 @@ A 2D Ludo game built with [Bevy](https://bevy.org) (0.20), compiled to WebAssemb
 
 | Crate | Description |
 |---|---|
-| [`ludo-core/`](ludo-core/) | Rules engine and the client/server protocol. Pure Rust, no I/O, unit tested. Shared by the other two crates. |
+| [`ludo-core/`](ludo-core/) | Rules engine, the client/server protocol and the reconnect timing. Pure Rust, no I/O, unit tested. Shared by the other two crates. |
 | [`ludo-game/`](ludo-game/) | The game: a Bevy app compiled to `wasm32-unknown-unknown` and bundled with [Trunk](https://trunkrs.dev). Everything on screen is Bevy: the board and tokens (`board.rs`, `play.rs`) and all menus and the HUD (`ui.rs`, built with `bevy_ui`, sized in `vmin` so it scales with the screen). `index.html` is just a viewport and a stylesheet. |
 | [`server/`](server/) | An axum server that embeds the game build (`ludo-game/dist`) and hosts online rooms over a WebSocket at `/ws`. |
 
@@ -50,6 +50,10 @@ docker run --rm -p 3000:3000 ludo
 
 The image is a single server binary (the game is embedded in it) on a distroless base, built for `linux/amd64`; see [Server settings](#server-settings) for the environment variables.
 
+## Testing unstable connections
+
+Open the game with `?chaos=1` (for example `http://127.0.0.1:3000/?chaos=1`) and it cuts its own connection every 20 to 60 seconds, so a whole game exercises reconnecting.
+
 ## Server settings
 
 | Variable | Default | Meaning |
@@ -60,7 +64,7 @@ The image is a single server binary (the game is embedded in it) on a distroless
 | `LUDO_IDLE_TIMEOUTS` | `3` | Timeouts in a row before a player counts as idle |
 | `LUDO_ROOM_GRACE_MS` | `900000` | How long a game with nobody connected is kept |
 | `LUDO_LOBBY_GRACE_MS` | `60000` | How long a dropped player keeps their place in a waiting room |
-| `LUDO_PING_MS` | `15000` | Heartbeat interval; behind Cloudflare keep it well under 100000 |
+| `LUDO_PING_MS` | `15000` | Heartbeat interval; keep it under 30000, as the game reconnects after 40 s of silence |
 | `LUDO_DEAD_MS` | `45000` | Silence after which a connection counts as dead; must be longer than `LUDO_PING_MS` |
 | `RUST_LOG` | `info` | Log filter |
 
@@ -83,7 +87,7 @@ The image is a single server binary (the game is embedded in it) on a distroless
 - **Same screen:** under the room list, start a 2, 3 or 4 player game on one device, no server needed.
 - **Playing:** tap **ROLL**, then tap one of the highlighted tokens. The server rolls the dice and validates every move.
 - **Turn timer:** if you do nothing for 10 seconds, the server plays your turn (it rolls, then makes a sensible move: capture, then reach home, then leave the yard, then advance). After three timeouts in a row you count as idle: a bot plays your turns until you act again, for example by tapping **Roll**. Nobody is removed for being slow.
-- **Dropped connections:** your seat is kept for as long as the game lasts. While you are offline each of your turns waits 15 seconds, then a bot plays it. Reconnect from the same browser to take over again. If nobody at all is connected the game pauses, and it is deleted after 15 minutes. In a waiting room your place is kept for 60 seconds.
+- **Dropped connections:** your seat is kept for as long as the game lasts. While you are offline each of your turns waits 15 seconds, then a bot plays it. The game reconnects by itself and keeps the board on screen meanwhile; reopening the page in the same browser also takes the seat back. If nobody at all is connected the game pauses, and it is deleted after 15 minutes. In a waiting room your place is kept for 60 seconds.
 - **Leaving:** **Leave game** removes you and your tokens. Play goes on while at least 2 players remain; the last player left wins.
 
 ## Rules implemented

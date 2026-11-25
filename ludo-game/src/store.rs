@@ -14,6 +14,7 @@ pub struct Profile {
 }
 
 const SETTINGS_KEY: &str = "ludo.settings";
+const ROOM_KEY: &str = "ludo.room";
 
 /// Display preferences, kept in local storage.
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -55,6 +56,20 @@ fn prefers_reduced_motion() -> bool {
     web_sys::window()
         .and_then(|w| w.match_media("(prefers-reduced-motion: reduce)").ok()?)
         .is_some_and(|m| m.matches())
+}
+
+/// The room we were last in, so a reloaded page knows it is rejoining.
+pub fn load_room() -> Option<u32> {
+    storage()?.get_item(ROOM_KEY).ok()??.parse().ok()
+}
+
+pub fn save_room(room: Option<u32>) {
+    if let Some(storage) = storage() {
+        let _ = match room {
+            Some(id) => storage.set_item(ROOM_KEY, &id.to_string()),
+            None => storage.remove_item(ROOM_KEY),
+        };
+    }
 }
 
 fn storage() -> Option<web_sys::Storage> {

@@ -163,10 +163,9 @@ fn setup_assets(
     });
 }
 
-/// Connect on start (once there is a profile), feed server messages into the
-/// session and retry dropped connections. The session is only marked changed
-/// when something actually happens.
-fn pump(mut session: ResMut<Session>, time: Res<Time>, mut booted: Local<bool>) {
+/// Connect on start (once there is a profile) and feed server messages into the
+/// session. The session is only marked changed when something actually happens.
+fn pump(mut session: ResMut<Session>, mut booted: Local<bool>) {
     if !*booted {
         *booted = true;
         if session.has_profile {
@@ -175,12 +174,6 @@ fn pump(mut session: ResMut<Session>, time: Res<Time>, mut booted: Local<bool>) 
     }
     for ev in net::poll() {
         session.handle_net(ev);
-    }
-    if let Some(left) = session.bypass_change_detection().reconnect_in.as_mut() {
-        *left -= time.delta_secs();
-        if *left <= 0.0 {
-            session.connect();
-        }
     }
 }
 

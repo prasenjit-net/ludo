@@ -140,6 +140,7 @@ impl Room {
                 name: m.name.clone(),
                 player: m.color,
                 connected: m.bot || m.conn.is_some(),
+                idle: m.idle,
                 bot: m.bot,
             })
             .collect()
